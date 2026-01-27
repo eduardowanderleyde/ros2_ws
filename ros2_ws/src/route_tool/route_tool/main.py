@@ -12,7 +12,7 @@ from rclpy.time import Time
 from rclpy.duration import Duration
 from rclpy.action import ActionClient
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Quaternion
 from std_srvs.srv import Trigger
 
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -29,7 +29,7 @@ class XYYaw:
     yaw: float
 
 
-def quat_to_yaw(q) -> float:
+def quat_to_yaw(q: Quaternion) -> float:
     """Convert geometry_msgs/Quaternion to yaw (rad)."""
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -161,11 +161,13 @@ class RouteTool(Node):
             response.message = 'Already navigating.'
             return response
 
+        # If empty, try loading from YAML so play works after restart
         if not self.route:
-            self.get_logger().warn('Play requested but route is empty.')
-            response.success = False
-            response.message = 'Route is empty.'
-            return response
+            self.get_logger().warn('Route empty in memory. Trying to load from YAML...')
+            if not self._load_route_yaml():
+                response.success = False
+                response.message = 'Route is empty and YAML could not be loaded.'
+                return response
 
         # Wait briefly for the Nav2 action server
         if not self.nav2_client.wait_for_server(timeout_sec=2.0):
@@ -176,7 +178,6 @@ class RouteTool(Node):
 
         goal_msg = NavigateThroughPoses.Goal()
         goal_msg.poses = self.route  # list[PoseStamped] in frame "map"
-        # goal_msg.behavior_tree = ""  # optional: custom BT xml path
 
         self.is_navigating = True
         self.get_logger().info(f'Sending route to Nav2: {len(self.route)} poses.')
@@ -228,7 +229,6 @@ class RouteTool(Node):
             self.is_navigating = False
             return
 
-        # status codes are in action_msgs/GoalStatus
         self.get_logger().info(f'Nav2 finished. status={status} result={result}')
         self.is_navigating = False
         self._goal_handle = None
@@ -241,8 +241,6 @@ class RouteTool(Node):
         self._last_feedback_log_time = now
 
         fb = feedback_msg.feedback
-        # NavigateThroughPoses feedback provides current_pose, distance_remaining, etc (varies by version)
-        # We log minimal info safely.
         try:
             self.get_logger().info(f'Nav2 feedback: distance_remaining={fb.distance_remaining:.2f}')
         except Exception:
@@ -312,6 +310,45 @@ class RouteTool(Node):
             yaml.safe_dump(data, f, sort_keys=False)
 
         return path
+
+    def _yaw_to_quat(self, yaw: float) -> Quaternion:
+        q = Quaternion()
+        q.x = 0.0
+        q.y = 0.0
+        q.z = math.sin(yaw / 2.0)
+        q.w = math.cos(yaw / 2.0)
+        return q
+
+    def _load_route_yaml(self) -> bool:
+        path = os.path.join(self.routes_dir, f'{self.route_name}.yaml')
+        if not os.path.exists(path):
+            self.get_logger().error(f'Route file not found: {path}')
+            return False
+
+        with open(path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+
+        frame = data.get('frame', self.global_frame)
+        poses = data.get('poses', [])
+        if not poses:
+            self.get_logger().error(f'No poses in route file: {path}')
+            return False
+
+        now_msg = self.get_clock().now().to_msg()
+        loaded: List[PoseStamped] = []
+        for item in poses:
+            p = PoseStamped()
+            p.header.frame_id = frame
+            p.header.stamp = now_msg
+            p.pose.position.x = float(item['x'])
+            p.pose.position.y = float(item['y'])
+            p.pose.position.z = 0.0
+            p.pose.orientation = self._yaw_to_quat(float(item.get('yaw', 0.0)))
+            loaded.append(p)
+
+        self.route = loaded
+        self.get_logger().info(f'Loaded route from YAML: {path} ({len(self.route)} poses)')
+        return True
 
 
 def main(args=None) -> None:
