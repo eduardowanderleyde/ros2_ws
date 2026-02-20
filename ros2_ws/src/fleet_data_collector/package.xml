@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>fleet_data_collector</name>
+  <version>0.1.0</version>
+  <description>Coleta de dados de sensores por robot_id: enable/disable, rosbag2 (API pronta para UI).</description>
+  <maintainer email="eduardo@example.com">Eduardo</maintainer>
+  <license>MIT</license>
+
+  <build_type>ament_python</build_type>
+
+  <depend>rclpy</depend>
+  <depend>fleet_msgs</depend>
+  <depend>rosbag2_py</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>python3</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

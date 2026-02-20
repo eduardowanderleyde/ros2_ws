@@ -1,0 +1,6 @@
+# Play (navigate) a saved route for one robot
+string robot_id
+string route_name
+---
+bool success
+string message

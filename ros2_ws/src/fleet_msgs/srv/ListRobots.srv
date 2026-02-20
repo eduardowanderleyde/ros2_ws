@@ -1,0 +1,3 @@
+# List registered robot IDs (for UI)
+---
+string[] robot_ids

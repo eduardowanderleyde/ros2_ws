@@ -1,0 +1,7 @@
+# Status of data collection for one robot (for UI)
+string robot_id
+---
+bool is_collecting
+string current_file
+uint64 bytes_written
+string message

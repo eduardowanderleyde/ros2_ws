@@ -1,0 +1,4 @@
+# List saved route names for one robot
+string robot_id
+---
+string[] route_names

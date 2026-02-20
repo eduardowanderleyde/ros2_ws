@@ -1,0 +1,9 @@
+# Enable sensor data collection for one robot
+# topics: e.g. ["scan", "odom", "imu"] (relative to robot namespace)
+# output_mode: "rosbag2" or "csv"
+string robot_id
+string[] topics
+string output_mode
+---
+bool success
+string message

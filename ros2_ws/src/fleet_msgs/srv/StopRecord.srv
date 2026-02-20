@@ -1,0 +1,5 @@
+# Stop recording and save route for one robot
+string robot_id
+---
+bool success
+string message
