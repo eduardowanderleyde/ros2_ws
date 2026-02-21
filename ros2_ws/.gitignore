@@ -3,6 +3,10 @@ build/
 install/
 log/
 
+# dados gravados (rotas e bags)
+routes/
+collections/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -98,8 +98,35 @@ ros2 service call /collection_status fleet_msgs/srv/CollectionStatus "{robot_id:
 
 ## Parâmetros
 
-- **fleet_orchestrator:** `robots`, `routes_dir`, `record_rate_hz`, `min_dist_m`, `min_yaw_deg`, `nav2_action_suffix`, `frame_map_suffix`, `frame_base_suffix`
+- **fleet_orchestrator:** `robots`, `routes_dir`, `record_rate_hz`, `min_dist_m`, `min_yaw_deg`, `nav2_action_suffix`, `frame_map_suffix`, `frame_base_suffix`, **`use_shared_map_frame`** (bool, default false). Se o SLAM publica `map` sem prefixo, use `use_shared_map_frame:=true` para TF `map` → `tb1/base_link` (senão usa `tb1/map` → `tb1/base_link`).
 - **fleet_data_collector:** `robots`, `collections_dir`. Tópicos conhecidos: `scan`, `odom`, `imu` (nomes relativos ao namespace do robô).
+
+## Diagnóstico TF (quando record fica vazio)
+
+Se o record sempre grava 0 pontos e o log diz `TF failed ... target_frame does not exist`, **não existe frame de mapa** no TF. Descubra quais frames existem com o stack do tb1 ligado (SLAM/Nav2 do robô rodando):
+
+**1) TF básico (odom → base_link)**  
+Se funcionar, o robô está publicando TF no namespace certo.
+
+```bash
+ros2 run tf2_ros tf2_echo odom tb1/base_link
+```
+
+**2) Snapshot do TF (nomes reais dos frames)**  
+Procure por `map` em `header.frame_id` ou `child_frame_id`. Se não existir, SLAM/localização não está ativo ou usa outro nome.
+
+```bash
+ros2 topic echo /tf --once
+```
+
+**3) Nós de SLAM/localização**  
+Confirme que algo de slam/amcl/map_server está rodando.
+
+```bash
+ros2 node list | egrep "slam|amcl|map|nav2"
+```
+
+**Interpretação:** Se existir `map -> odom` (ou `tb1/map -> tb1/odom`), use esse frame no orchestrator (`use_shared_map_frame` ou frames prefixados). Se só existir `odom -> tb1/base_link`, falta subir SLAM/localização para ter `map`.
 
 ## Validação antes da UI (obrigatória)
 

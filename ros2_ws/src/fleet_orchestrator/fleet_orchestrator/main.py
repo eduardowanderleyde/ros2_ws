@@ -72,6 +72,9 @@ class FleetOrchestrator(Node):
         self.declare_parameter("nav2_action_suffix", "navigate_through_poses")
         self.declare_parameter("frame_map_suffix", "map")
         self.declare_parameter("frame_base_suffix", "base_link")
+        # Se True: usa "map" (sem prefixo) para todos os robôs (SLAM publica só "map").
+        # Se False: usa "tbX/map" por robô (multi-mapa).
+        self.declare_parameter("use_shared_map_frame", False)
 
         self.robots: List[str] = self.get_parameter("robots").value
         self.routes_dir: str = self.get_parameter("routes_dir").value
@@ -81,6 +84,7 @@ class FleetOrchestrator(Node):
         self.nav2_action_suffix: str = self.get_parameter("nav2_action_suffix").value
         self.frame_map_suffix: str = self.get_parameter("frame_map_suffix").value
         self.frame_base_suffix: str = self.get_parameter("frame_base_suffix").value
+        self.use_shared_map_frame: bool = self.get_parameter("use_shared_map_frame").value
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -116,6 +120,8 @@ class FleetOrchestrator(Node):
         )
 
     def _global_frame(self, robot_id: str) -> str:
+        if self.use_shared_map_frame:
+            return "map"
         return f"{robot_id}/{self.frame_map_suffix}"
 
     def _base_frame(self, robot_id: str) -> str:
@@ -451,7 +457,8 @@ def main(args=None) -> None:
         node.get_logger().info("Shutting down (KeyboardInterrupt).")
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
