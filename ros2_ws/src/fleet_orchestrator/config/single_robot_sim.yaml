@@ -1,0 +1,17 @@
+# Config para 1 robô em simulação (sem namespace: map, base_link, /navigate_through_poses).
+# Uso: ros2 launch fleet_orchestrator fleet.launch.py params_file:=config/single_robot_sim.yaml
+# Ou: ros2 run fleet_orchestrator fleet_orchestrator --ros-args --params-file src/fleet_orchestrator/config/single_robot_sim.yaml
+
+fleet_orchestrator:
+  ros__parameters:
+    robots: [""]
+    use_shared_map_frame: true
+    routes_dir: "routes"
+    record_rate_hz: 5.0
+    min_dist_m: 0.10
+    min_yaw_deg: 5.0
+
+sensor_collector:
+  ros__parameters:
+    robots: [""]
+    collections_dir: "collections"

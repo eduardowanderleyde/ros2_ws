@@ -1,0 +1,9 @@
+# Manda o robô ir para um único ponto (x, y) no mapa. UI: "mandar um ponto".
+string robot_id
+float64 x
+float64 y
+float64 yaw   # orientação no goal (rad). 0 = manter direção padrão
+---
+bool success
+string message
+string error_code   # NAV2_UNAVAILABLE, ALREADY_RECORDING, ALREADY_NAVIGATING

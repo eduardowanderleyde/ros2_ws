@@ -7,3 +7,4 @@ string output_mode
 ---
 bool success
 string message
+string error_code   # ALREADY_COLLECTING, UNKNOWN_ROBOT, UNKNOWN_TOPIC

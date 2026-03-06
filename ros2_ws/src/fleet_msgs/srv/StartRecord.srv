@@ -4,3 +4,4 @@ string route_name
 ---
 bool success
 string message
+string error_code   # vazio se ok; UNKNOWN_ROBOT, ALREADY_NAVIGATING

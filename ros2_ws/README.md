@@ -40,8 +40,8 @@ ros2_ws/
 
 | Pacote | Descrição |
 |--------|-----------|
-| **fleet_msgs** | `StartRecord`, `StopRecord`, `PlayRoute`, `Cancel`, `ListRobots`, `ListRoutes`, `EnableCollection`, `DisableCollection`, `CollectionStatus` |
-| **fleet_orchestrator** | Nó que expõe start_record, stop_record, play_route, cancel, list_robots, list_routes (por `robot_id`) |
+| **fleet_msgs** | `StartRecord`, `StopRecord`, `PlayRoute`, `GoToPoint`, `Cancel`, `ListRobots`, `ListRoutes`, `EnableCollection`, `DisableCollection`, `CollectionStatus` |
+| **fleet_orchestrator** | Nó que expõe start_record, stop_record, play_route, **go_to_point** (ir para um ponto x,y), cancel, list_robots, list_routes (por `robot_id`) |
 | **fleet_data_collector** | Nó que expõe enable_collection, disable_collection, collection_status (por `robot_id`); grava em **rosbag2** |
 | **route_tool** | Nó legado (um robô, services Trigger) |
 
@@ -73,6 +73,44 @@ Terminal 2 – coletor:
 ros2 run fleet_data_collector sensor_collector
 ```
 
+**Ou subir tudo com o launch (sem vários terminais):**
+
+```bash
+ros2 launch fleet_orchestrator fleet.launch.py
+# Para sim 1 robô sem namespace (map, base_link, /navigate_through_poses):
+# use config YAML ou ros2 run com -p robots:="['']" -p use_shared_map_frame:=true
+```
+
+### Modo single-robot (simulação sem namespace)
+
+Se o simulador usa `map`, `base_link` e `/navigate_through_poses` (sem prefixo tb1/):
+
+- **Orchestrator:** `robots:=['']`, `use_shared_map_frame:=true`. Rotas em `routes/default/`.
+- **Collector:** `robots:=['']`. Tópicos `/scan`, `/odom`; bags em `collections/default/`.
+- Nos services use `robot_id: ''` (string vazia). `list_robots` retorna `['']` ou exibe como "default".
+
+**Config YAML pronta para sim:** `fleet_orchestrator/config/single_robot_sim.yaml` (robots: [''], use_shared_map_frame: true). Após o build, use com o launch: `ros2 launch fleet_orchestrator fleet.launch.py --params-file install/fleet_orchestrator/share/fleet_orchestrator/config/single_robot_sim.yaml` ou rode os nós com `--params-file <path>/single_robot_sim.yaml`.
+
+**Script de teste:** `python3 scripts/test_fleet_cases.py --single-robot` usa `robot_id: ''` em todos os testes.
+
+## Erros padronizados (error_code)
+
+Os services retornam `success`, `message` e **`error_code`** (string; vazio se ok). A UI pode tratar por código:
+
+- **Orchestrator:** `UNKNOWN_ROBOT`, `ALREADY_NAVIGATING`, `ALREADY_RECORDING`, `ROUTE_NOT_FOUND`, `NAV2_UNAVAILABLE`, `NAV2_REJECTED`, `TF_MISSING`, `CANCEL_FAILED`
+- **Collector:** `UNKNOWN_ROBOT`, `ALREADY_COLLECTING`, `UNSUPPORTED_OUTPUT_MODE`, `NO_VALID_TOPICS`, `BAG_PATH_EXISTS`, `ENABLE_FAILED`, `DISABLE_FAILED`
+
+O tópico `/fleet/status` inclui `last_error` (código ou vazio) e `nav_state=failed` quando há erro (ex.: TF ausente, Nav2 rejeitou).
+
+## Tópico /fleet/status (para a UI)
+
+O orchestrator publica **`/fleet/status`** (tipo `fleet_msgs/msg/FleetStatus`) a 1 Hz com estado agregado por robô:
+
+- `robot_id`, `nav_state` (idle | recording | navigating | failed), `current_route`
+- `collection_on`, `collection_file`, `bytes_written`, `last_error`
+
+A UI pode **assinar só esse tópico** e chamar services quando o usuário agir; evita polling em vários services.
+
 ## Exemplos de chamadas (API para UI)
 
 Robots padrão: `tb1`, `tb2`, `tb3`. Troque por seus namespaces.
@@ -83,6 +121,7 @@ Robots padrão: `tb1`, `tb2`, `tb3`. Troque por seus namespaces.
 ros2 service call /start_record fleet_msgs/srv/StartRecord "{robot_id: 'tb1', route_name: 'r1'}"
 ros2 service call /stop_record fleet_msgs/srv/StopRecord "{robot_id: 'tb1'}"
 ros2 service call /play_route fleet_msgs/srv/PlayRoute "{robot_id: 'tb1', route_name: 'r1'}"
+ros2 service call /go_to_point fleet_msgs/srv/GoToPoint "{robot_id: 'tb1', x: 1.0, y: 0.5, yaw: 0.0}"
 ros2 service call /cancel fleet_msgs/srv/Cancel "{robot_id: 'tb1'}"
 ros2 service call /list_robots fleet_msgs/srv/ListRobots "{}"
 ros2 service call /list_routes fleet_msgs/srv/ListRoutes "{robot_id: 'tb1'}"
@@ -169,7 +208,7 @@ Se travar no enable/disable, a UI vai “ligar coleta” e nada acontece.
 ### Conferir que a API está exposta
 
 ```bash
-ros2 service list | grep -E "start_record|stop_record|play_route|enable_collection|disable_collection"
+ros2 service list | grep -E "start_record|stop_record|play_route|go_to_point|enable_collection|disable_collection"
 ```
 
 Deve listar os services do orchestrator e do collector.
@@ -188,17 +227,25 @@ Só depois disso: implementar UI (recomendado: Web UI com FastAPI + WebSocket).
 
 ---
 
-## Depois da validação (pronto pra UI)
+## O que falta para "terminar"
 
-Para a UI ficar simples e responsiva, o próximo passo da ferramenta é:
+### Backend funcional (sem UI)
 
-1. **Tópico `/fleet/status`** — msg agregada por robô: nav state (idle/running/succeeded/failed), rota ativa + waypoint atual, coleta on/off + caminho do bag, último erro. A UI assina um tópico em vez de fazer poll em vários services.
-2. **PlayRoute observável** — feedback de progresso (e publicar no `/fleet/status`). Cancel já existe.
-3. **Política de gravação de rota** — hoje: distância mínima (min_dist_m) e ângulo (min_yaw_deg). Opcional: documentar ou fixar “a cada X m” (ex.: 0,20 m) para consistência.
+1. **Ambiente de teste real** — Subir 1 TurtleBot simulado com SLAM/Nav2 e validar TF, actions, record, go_to_point.
+2. **Fleet para 1 robô simulado** — Já suportado: `robots:=['']`, frames `map`/`base_link`; rotas em `routes/default/`, coleta em `collections/default/`.
+3. **Teste end-to-end passar** — Fluxo: start_record → stop_record → YAML → list_routes → play_route → go_to_point → enable/disable_collection → `ros2 bag info`.
+4. **Launch de bringup** — Feito: `ros2 launch fleet_orchestrator fleet.launch.py`.
+
+### Pronto para UI
+
+5. **Tópico /fleet/status** — Feito. UI assina e evita polling.
+6. **Padronizar erros** — Opcional: `error_code` nos .srv; UI trata por código.
+7. **UX mínima** — Seletor de robô; botões record/play/cancel; go_to_point (x,y,yaw); enable/disable collection; lista de rotas; status ao vivo.
+
 
 ---
 
 ## Próximos passos (quando for fazer a UI)
 
-- UI (web ou rqt) chama apenas esses serviços (e depois assina `/fleet/status`); não fala direto com Nav2 nem sensores.
-- Possível adicionar `fleet_ui_api` (REST/WebSocket) e `fleet_bringup` (launch files) depois.
+- UI (web ou rqt) chama services e assina `/fleet/status`.
+- Recomendado: Web UI (FastAPI + WebSocket) ou `fleet_ui_api` (REST/WebSocket).

@@ -4,3 +4,4 @@ string route_name
 ---
 bool success
 string message
+string error_code   # ROUTE_NOT_FOUND, NAV2_UNAVAILABLE, ALREADY_RECORDING, ALREADY_NAVIGATING

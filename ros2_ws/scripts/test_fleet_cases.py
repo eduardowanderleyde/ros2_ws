@@ -5,7 +5,7 @@ Script para testar casos do fleet (orchestrator + data collector).
 Uso (com workspace e ROS 2 já sourceados):
   cd /path/to/ros2_ws
   source install/setup.bash
-  python3 scripts/test_fleet_cases.py [--robot tb1] [--route r1] [--no-record] [--no-collection] [--with-play]
+  python3 scripts/test_fleet_cases.py [--robot tb1] [--route r1] [--single-robot] [--no-record] [--no-collection] [--with-play]
 
 Cenários:
   1) list_robots
@@ -40,12 +40,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Testa serviços do fleet (orchestrator + collector).")
     parser.add_argument("--robot", default="tb1", help="robot_id para testes")
     parser.add_argument("--route", default="r1", help="nome da rota para record/play")
+    parser.add_argument("--single-robot", action="store_true", help="usa robot_id vazio (sim sem namespace: map, base_link)")
     parser.add_argument("--no-record", action="store_true", help="pula testes de record (start/stop)")
     parser.add_argument("--no-collection", action="store_true", help="pula testes de coleta (enable/disable)")
     parser.add_argument("--with-play", action="store_true", help="inclui play_route (requer Nav2 e rota salva)")
     parser.add_argument("--wait-record", type=float, default=2.0, help="segundos entre start_record e stop_record")
     parser.add_argument("--wait-collection", type=float, default=5.0, help="segundos entre enable e disable collection")
     args = parser.parse_args()
+    if args.single_robot:
+        args.robot = ""
 
     rclpy.init()
     node = Node("test_fleet_cases")

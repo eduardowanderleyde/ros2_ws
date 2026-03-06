@@ -11,6 +11,8 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/RobotState.msg"
+  "msg/FleetStatus.msg"
   "srv/StartRecord.srv"
   "srv/StopRecord.srv"
   "srv/PlayRoute.srv"
@@ -20,6 +22,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ListRoutes.srv"
   "srv/CollectionStatus.srv"
   "srv/Cancel.srv"
+  "srv/GoToPoint.srv"
   DEPENDENCIES std_msgs
 )
 

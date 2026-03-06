@@ -81,7 +81,12 @@ class SensorCollector(Node):
         )
 
     def _full_topic(self, robot_id: str, short_name: str) -> str:
-        return f"/{robot_id}/{short_name}" if not short_name.startswith("/") else short_name
+        if short_name.startswith("/"):
+            return short_name
+        # Sim sem namespace: robot_id vazio -> /scan, /odom, etc.
+        if not robot_id:
+            return f"/{short_name}"
+        return f"/{robot_id}/{short_name}"
 
     def _handle_enable(
         self, request: EnableCollection.Request, response: EnableCollection.Response
@@ -90,12 +95,14 @@ class SensorCollector(Node):
         if robot_id not in self._state:
             response.success = False
             response.message = f"Unknown robot_id: {robot_id}. Known: {self.robots}."
+            response.error_code = "UNKNOWN_ROBOT"
             return response
 
         state = self._state[robot_id]
         if state.enabled:
             response.success = False
             response.message = f"Collection already enabled for {robot_id}. Disable first."
+            response.error_code = "ALREADY_COLLECTING"
             return response
 
         topics = [t.strip() for t in request.topics if t.strip()]
@@ -106,9 +113,11 @@ class SensorCollector(Node):
         if output_mode != "rosbag2":
             response.success = False
             response.message = f"Only output_mode 'rosbag2' is supported for now. Got: {output_mode}"
+            response.error_code = "UNSUPPORTED_OUTPUT_MODE"
             return response
 
-        base = os.path.join(self.collections_dir, robot_id)
+        key = robot_id if robot_id else "default"
+        base = os.path.join(self.collections_dir, key)
         os.makedirs(base, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         bag_uri = os.path.join(base, stamp)
@@ -116,6 +125,7 @@ class SensorCollector(Node):
         if os.path.exists(bag_uri):
             response.success = False
             response.message = f"Bag path already exists: {bag_uri}"
+            response.error_code = "BAG_PATH_EXISTS"
             return response
 
         try:
@@ -145,6 +155,7 @@ class SensorCollector(Node):
             if not topic_meta:
                 response.success = False
                 response.message = "No valid topics to record."
+                response.error_code = "NO_VALID_TOPICS"
                 return response
 
             subs = []
@@ -165,10 +176,12 @@ class SensorCollector(Node):
             )
             response.success = True
             response.message = f"Collection enabled for {robot_id}. Bag: {bag_uri}"
+            response.error_code = ""
         except Exception as e:
             self.get_logger().error(f"Enable collection failed: {e}")
             response.success = False
             response.message = str(e)
+            response.error_code = "ENABLE_FAILED"
         return response
 
     def _make_write_cb(self, robot_id: str, topic_name: str, writer):
@@ -194,12 +207,14 @@ class SensorCollector(Node):
         if robot_id not in self._state:
             response.success = False
             response.message = f"Unknown robot_id: {robot_id}."
+            response.error_code = "UNKNOWN_ROBOT"
             return response
 
         state = self._state[robot_id]
         if not state.enabled:
             response.success = True
             response.message = f"Collection was not enabled for {robot_id}."
+            response.error_code = ""
             return response
 
         try:
@@ -217,10 +232,12 @@ class SensorCollector(Node):
             self.get_logger().info(f"[{robot_id}] Collection disabled. Bag saved: {bag_uri}")
             response.success = True
             response.message = f"Collection disabled for {robot_id}. Bag: {bag_uri}"
+            response.error_code = ""
         except Exception as e:
             self.get_logger().error(f"Disable collection failed: {e}")
             response.success = False
             response.message = str(e)
+            response.error_code = "DISABLE_FAILED"
         return response
 
     def _handle_status(
