@@ -11,17 +11,19 @@ Interface web para o fleet: mapa clicável (go_to_point), botões de rota e stat
 
 O backend precisa do ambiente ROS 2 (workspace sourceado) para assinar `/fleet/status` e chamar os services.
 
+**Pré-requisito (uma vez):** `sudo apt install python3.12-venv`
+
 ```bash
 cd /caminho/para/ros2_ws/ros2_ws
 source install/setup.bash
 
-# Opcional: venv para FastAPI
-python3 -m venv fleet_ui/backend/venv
-source fleet_ui/backend/venv/bin/activate  # ou .\venv\Scripts\activate no Windows
-pip install -r fleet_ui/backend/requirements.txt
+# Opção 1 — script que cria venv na primeira vez e sobe o backend
+./fleet_ui/backend/run.sh
 
-# Sobe o backend (porta 8000)
-python fleet_ui/backend/main.py
+# Opção 2 — manual
+python3 -m venv fleet_ui/backend/venv
+fleet_ui/backend/venv/bin/pip install -r fleet_ui/backend/requirements.txt
+source install/setup.bash && fleet_ui/backend/venv/bin/python fleet_ui/backend/main.py
 ```
 
 Ou com uvicorn direto (com o mesmo `source install/setup.bash` no mesmo terminal):

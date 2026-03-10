@@ -18,3 +18,7 @@ __pycache__/
 .vscode/
 *.swp
 *~
+
+# Fleet UI
+fleet_ui/backend/venv/
+fleet_ui/frontend/node_modules/
