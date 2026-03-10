@@ -266,6 +266,13 @@ input:focus, select:focus {
   font-family: 'JetBrains Mono', monospace;
 }
 
+.robot-card .row.collection-on {
+  background: rgba(110, 231, 183, 0.12);
+  margin: 0 -0.9rem;
+  padding: 0.35rem 0.9rem;
+  border-radius: 6px;
+}
+
 .nav-state {
   display: inline-block;
   padding: 0.2rem 0.5rem;

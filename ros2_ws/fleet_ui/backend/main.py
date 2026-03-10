@@ -114,7 +114,7 @@ async def websocket_status(websocket: WebSocket):
         with _status_lock:
             await websocket.send_text(json.dumps(_fleet_status))
         while True:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
             with _status_lock:
                 await websocket.send_text(json.dumps(_fleet_status))
     except WebSocketDisconnect:

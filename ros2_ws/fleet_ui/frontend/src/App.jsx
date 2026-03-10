@@ -46,6 +46,20 @@ export default function App() {
     return { ok, data }
   }
 
+  const refetchStatus = useCallback(() => {
+    fetch(`${API}/status`)
+      .then((r) => r.json())
+      .then((data) => data && setStatus(data))
+      .catch(() => {})
+  }, [])
+
+  const afterAction = useCallback(() => {
+    refetchStatus()
+    const t1 = setTimeout(refetchStatus, 800)
+    const t2 = setTimeout(refetchStatus, 1600)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [refetchStatus])
+
   const loadRoutes = useCallback(async () => {
     const { data } = await call(`/list_routes?robot_id=${encodeURIComponent(selectedRobot)}`, 'GET')
     setRouteList(data.route_names || [])
@@ -85,9 +99,9 @@ export default function App() {
 
   useEffect(() => {
     if (wsLive) return
-    const t = setInterval(() => fetch(`${API}/status`).then((r) => r.json()).then(setStatus).catch(() => {}), 2000)
+    const t = setInterval(refetchStatus, 1000)
     return () => clearInterval(t)
-  }, [wsLive])
+  }, [wsLive, refetchStatus])
 
   const handleMapClick = (e) => {
     const canvas = mapRef.current
@@ -169,43 +183,51 @@ export default function App() {
     if (!target) return
     const { ok, data } = await call(`/go_to_point?${q({ robot_id: selectedRobot, x: target.x, y: target.y, yaw: 0 })}`, 'POST')
     showToast(ok ? 'Go to point enviado.' : (data?.message || 'Erro'), !ok)
+    if (ok) afterAction()
   }
 
   const startRecord = async () => {
     const { ok, data } = await call(`/start_record?${q({ robot_id: selectedRobot, route_name: routeName })}`, 'POST')
     showToast(ok ? 'Record iniciado.' : (data?.message || 'Erro'), !ok)
-    if (ok) loadRoutes()
+    if (ok) { loadRoutes(); afterAction() }
   }
 
   const stopRecord = async () => {
     const { ok, data } = await call(`/stop_record?${q({ robot_id: selectedRobot })}`, 'POST')
     showToast(ok ? 'Record parado. Rota salva.' : (data?.message || 'Erro'), !ok)
-    if (ok) loadRoutes()
+    if (ok) { loadRoutes(); afterAction() }
   }
 
   const playRoute = async () => {
     const { ok, data } = await call(`/play_route?${q({ robot_id: selectedRobot, route_name: routeName })}`, 'POST')
     showToast(ok ? 'Play route enviado.' : (data?.message || 'Erro'), !ok)
+    if (ok) afterAction()
   }
 
   const cancel = async () => {
     const { ok, data } = await call(`/cancel?${q({ robot_id: selectedRobot })}`, 'POST')
     showToast(ok ? 'Cancelado.' : (data?.message || 'Erro'), !ok)
+    if (ok) afterAction()
   }
 
   const enableCollection = async () => {
     const { ok, data } = await call(`/enable_collection?${q({ robot_id: selectedRobot })}`, 'POST')
     showToast(ok ? 'Coleta ativada.' : (data?.message || 'Erro'), !ok)
+    if (ok) afterAction()
   }
 
   const disableCollection = async () => {
     const { ok, data } = await call(`/disable_collection?${q({ robot_id: selectedRobot })}`, 'POST')
     showToast(ok ? 'Coleta desativada.' : (data?.message || 'Erro'), !ok)
+    if (ok) afterAction()
   }
 
   const robots = status.robots.length
     ? status.robots
     : [{ robot_id: '', nav_state: 'idle', current_route: '', collection_on: false, collection_file: '', last_error: '', bytes_written: 0 }]
+
+  const selectedRobotState = robots.find((r) => r.robot_id === selectedRobot) || robots[0]
+  const collectionOn = selectedRobotState.collection_on
 
   return (
     <div className="app">
@@ -268,8 +290,11 @@ export default function App() {
               <button className="btn" onClick={stopRecord}>Parar gravação</button>
               <button className="btn btn-primary" onClick={playRoute}>Reproduzir rota</button>
               <button className="btn btn-danger" onClick={cancel}>Cancelar</button>
-              <button className="btn" onClick={enableCollection}>Ligar coleta</button>
-              <button className="btn" onClick={disableCollection}>Desligar coleta</button>
+              {collectionOn ? (
+                <button className="btn btn-danger" onClick={disableCollection}>Desligar coleta</button>
+              ) : (
+                <button className="btn btn-primary" onClick={enableCollection}>Ligar coleta</button>
+              )}
             </div>
           </div>
         </div>
@@ -288,7 +313,7 @@ export default function App() {
                   <span>Rota atual</span>
                   <span>{r.current_route || '—'}</span>
                 </div>
-                <div className="row">
+                <div className={`row ${r.collection_on ? 'collection-on' : ''}`}>
                   <span>Coleta</span>
                   <span>{r.collection_on ? 'ON' : 'OFF'}</span>
                 </div>
