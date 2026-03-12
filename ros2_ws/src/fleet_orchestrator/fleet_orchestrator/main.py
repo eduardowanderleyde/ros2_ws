@@ -90,6 +90,8 @@ class FleetOrchestrator(Node):
         # Se True: usa "map" (sem prefixo) para todos os robôs (SLAM publica só "map").
         # Se False: usa "tbX/map" por robô (multi-mapa).
         self.declare_parameter("use_shared_map_frame", False)
+        # YAML opcional com roles (MUUT/FUUT/SU) por robô
+        self.declare_parameter("roles_config", "src/fleet_orchestrator/config/roles.yaml")
 
         self.robots: List[str] = self.get_parameter("robots").value
         self.routes_dir: str = self.get_parameter("routes_dir").value
@@ -100,6 +102,7 @@ class FleetOrchestrator(Node):
         self.frame_map_suffix: str = self.get_parameter("frame_map_suffix").value
         self.frame_base_suffix: str = self.get_parameter("frame_base_suffix").value
         self.use_shared_map_frame: bool = self.get_parameter("use_shared_map_frame").value
+        self.roles_config: str = self.get_parameter("roles_config").value
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -107,6 +110,7 @@ class FleetOrchestrator(Node):
         self._state: Dict[str, RobotRouteState] = {
             rid: RobotRouteState() for rid in self.robots
         }
+        self._roles: Dict[str, str] = self._load_roles()
         self._nav2_clients: Dict[str, ActionClient] = {}
         self._last_feedback_log_ns: Dict[str, int] = {}
         self._collection_status_client = self.create_client(CollectionStatus, "collection_status")
@@ -136,8 +140,35 @@ class FleetOrchestrator(Node):
         self._go_to_point_srv = self.create_service(GoToPoint, "go_to_point", self._handle_go_to_point)
 
         self.get_logger().info(
-            f"fleet_orchestrator ready. Robots: {self.robots}. API: start_record, stop_record, play_route, go_to_point, cancel, list_robots, list_routes."
+            f"fleet_orchestrator ready. Robots: {self.robots}. Roles: {self._roles}. "
+            "API: start_record, stop_record, play_route, go_to_point, cancel, list_robots, list_routes."
         )
+
+    def _load_roles(self) -> Dict[str, str]:
+        """Carrega roles por robô a partir de um YAML opcional."""
+        path = self.roles_config
+        roles: Dict[str, str] = {}
+        if not path:
+            return roles
+        try:
+            if not os.path.isabs(path):
+                # relativo ao workspace ou ao pacote
+                base = os.path.dirname(os.path.dirname(__file__))
+                path = os.path.join(base, "..", path)
+                path = os.path.abspath(path)
+            if not os.path.exists(path):
+                self.get_logger().warn(f"roles_config não encontrado: {path}")
+                return roles
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            raw = data.get("roles", {}) or {}
+            for rid in self.robots:
+                r = rid or "default"
+                roles[rid] = str(raw.get(r, "MUUT"))
+            return roles
+        except Exception as e:
+            self.get_logger().warn(f"Falha ao carregar roles_config ({path}): {e}")
+            return {}
 
     def _global_frame(self, robot_id: str) -> str:
         if not robot_id:
@@ -166,6 +197,7 @@ class FleetOrchestrator(Node):
         for rid in self.robots:
             rs = RobotState()
             rs.robot_id = rid if rid else "default"
+            rs.role = self._roles.get(rid, "MUUT")
             state = self._state[rid]
             if state.is_recording:
                 rs.nav_state = "recording"

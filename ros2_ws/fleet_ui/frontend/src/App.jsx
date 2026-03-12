@@ -224,10 +224,12 @@ export default function App() {
 
   const robots = status.robots.length
     ? status.robots
-    : [{ robot_id: '', nav_state: 'idle', current_route: '', collection_on: false, collection_file: '', last_error: '', bytes_written: 0 }]
+    : [{ robot_id: '', role: 'MUUT', nav_state: 'idle', current_route: '', collection_on: false, collection_file: '', last_error: '', bytes_written: 0 }]
 
   const selectedRobotState = robots.find((r) => r.robot_id === selectedRobot) || robots[0]
   const collectionOn = selectedRobotState.collection_on
+  const selectedRole = selectedRobotState.role || 'MUUT'
+  const isMobile = selectedRole === 'MUUT'
 
   return (
     <div className="app">
@@ -261,7 +263,7 @@ export default function App() {
           </div>
 
           <div className="panel" style={{ marginTop: '1rem' }}>
-            <h2>Controles</h2>
+            <h2>Controles ({selectedRole})</h2>
             <div className="controls">
               <label>
                 Robô:
@@ -286,10 +288,10 @@ export default function App() {
               </label>
             </div>
             <div className="controls">
-              <button className="btn btn-primary" onClick={startRecord}>Iniciar gravação</button>
-              <button className="btn" onClick={stopRecord}>Parar gravação</button>
-              <button className="btn btn-primary" onClick={playRoute}>Reproduzir rota</button>
-              <button className="btn btn-danger" onClick={cancel}>Cancelar</button>
+              <button className="btn btn-primary" onClick={startRecord} disabled={!isMobile}>Iniciar gravação</button>
+              <button className="btn" onClick={stopRecord} disabled={!isMobile}>Parar gravação</button>
+              <button className="btn btn-primary" onClick={playRoute} disabled={!isMobile}>Reproduzir rota</button>
+              <button className="btn btn-danger" onClick={cancel} disabled={!isMobile}>Cancelar</button>
               {collectionOn ? (
                 <button className="btn btn-danger" onClick={disableCollection}>Desligar coleta</button>
               ) : (
@@ -305,6 +307,10 @@ export default function App() {
             {robots.map((r) => (
               <div key={r.robot_id} className="robot-card">
                 <h3>{r.robot_id || '(default)'}</h3>
+                <div className="row">
+                  <span>Papel</span>
+                  <span>{r.role || 'MUUT'}</span>
+                </div>
                 <div className="row">
                   <span>Nav</span>
                   <span className={`nav-state ${r.nav_state}`}>{r.nav_state}</span>

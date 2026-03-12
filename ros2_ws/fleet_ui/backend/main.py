@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
                     _fleet_status["robots"] = [
                         {
                             "robot_id": r.robot_id,
+                            "role": r.role,
                             "nav_state": r.nav_state,
                             "current_route": r.current_route,
                             "collection_on": r.collection_on,
