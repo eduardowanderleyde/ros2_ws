@@ -180,6 +180,10 @@ export default function App() {
   const q = (params) => new URLSearchParams(params).toString()
 
   const goToPoint = async () => {
+    if (!isMobile) {
+      showToast('Role selecionado não permite movimento (somente MUUT).', true)
+      return
+    }
     if (!target) return
     const { ok, data } = await call(`/go_to_point?${q({ robot_id: selectedRobot, x: target.x, y: target.y, yaw: 0 })}`, 'POST')
     showToast(ok ? 'Go to point enviado.' : (data?.message || 'Erro'), !ok)
@@ -255,7 +259,7 @@ export default function App() {
                 <span>
                   {target ? `x: ${target.x.toFixed(2)} m  y: ${target.y.toFixed(2)} m` : 'Clique no mapa'}
                 </span>
-                <button className="btn btn-go" disabled={!target} onClick={goToPoint}>
+                <button className="btn btn-go" disabled={!target || !isMobile} onClick={goToPoint}>
                   Ir para ponto
                 </button>
               </div>

@@ -48,6 +48,7 @@ class ErrorCode:
     NAV2_UNAVAILABLE = "NAV2_UNAVAILABLE"
     NAV2_REJECTED = "NAV2_REJECTED"
     TF_MISSING = "TF_MISSING"
+    ROLE_NOT_ALLOWED = "ROLE_NOT_ALLOWED"
 
 
 @dataclass
@@ -143,6 +144,12 @@ class FleetOrchestrator(Node):
             f"fleet_orchestrator ready. Robots: {self.robots}. Roles: {self._roles}. "
             "API: start_record, stop_record, play_route, go_to_point, cancel, list_robots, list_routes."
         )
+
+    def _role(self, robot_id: str) -> str:
+        return self._roles.get(robot_id, "MUUT")
+
+    def _is_mobile_role(self, robot_id: str) -> bool:
+        return self._role(robot_id) == "MUUT"
 
     def _load_roles(self) -> Dict[str, str]:
         """Carrega roles por robô a partir de um YAML opcional."""
@@ -248,6 +255,12 @@ class FleetOrchestrator(Node):
             response.message = f"Unknown robot_id: {robot_id}. Known: {self.robots}."
             response.error_code = ErrorCode.UNKNOWN_ROBOT
             return response
+        if not self._is_mobile_role(robot_id):
+            role = self._role(robot_id)
+            response.success = False
+            response.message = f"Role {role} is fixed/support. start_record allowed only for MUUT."
+            response.error_code = ErrorCode.ROLE_NOT_ALLOWED
+            return response
 
         state = self._state[robot_id]
         if state.is_navigating:
@@ -276,6 +289,12 @@ class FleetOrchestrator(Node):
             response.success = False
             response.message = f"Unknown robot_id: {robot_id}."
             response.error_code = ErrorCode.UNKNOWN_ROBOT
+            return response
+        if not self._is_mobile_role(robot_id):
+            role = self._role(robot_id)
+            response.success = False
+            response.message = f"Role {role} is fixed/support. stop_record allowed only for MUUT."
+            response.error_code = ErrorCode.ROLE_NOT_ALLOWED
             return response
 
         state = self._state[robot_id]
@@ -306,6 +325,12 @@ class FleetOrchestrator(Node):
             response.success = False
             response.message = f"Unknown robot_id: {robot_id}."
             response.error_code = ErrorCode.UNKNOWN_ROBOT
+            return response
+        if not self._is_mobile_role(robot_id):
+            role = self._role(robot_id)
+            response.success = False
+            response.message = f"Role {role} is fixed/support. play_route allowed only for MUUT."
+            response.error_code = ErrorCode.ROLE_NOT_ALLOWED
             return response
 
         state = self._state[robot_id]
@@ -363,6 +388,12 @@ class FleetOrchestrator(Node):
             response.success = False
             response.message = f"Unknown robot_id: {robot_id}. Known: {self.robots}."
             response.error_code = ErrorCode.UNKNOWN_ROBOT
+            return response
+        if not self._is_mobile_role(robot_id):
+            role = self._role(robot_id)
+            response.success = False
+            response.message = f"Role {role} is fixed/support. go_to_point allowed only for MUUT."
+            response.error_code = ErrorCode.ROLE_NOT_ALLOWED
             return response
 
         state = self._state[robot_id]

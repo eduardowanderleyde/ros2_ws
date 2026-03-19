@@ -269,6 +269,23 @@ python3 scripts/test_fleet_cases.py --single-robot
 
 **Objetivo:** services disponíveis, `/fleet/status` publicando, start_record gravando pontos, play_route e go_to_point executando, coleta gerando bag válido. Só depois disso começar a UI. Validação manual primeiro; não misturar problema do simulador com problema do fleet.
 
+### Teste automático por papéis (MUUT/FUUT/SU), sem UI
+
+Com `tb1=MUUT`, `tb2=FUUT`, `tb3=SU` (definidos em `src/fleet_orchestrator/config/roles.yaml`):
+
+```bash
+cd /home/eduardo/Documentos/ros2_ws/ros2_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+python3 scripts/test_roles_automatic.py --muut tb1 --fuut tb2 --su tb3
+```
+
+Esse script faz automaticamente:
+- habilita coleta nos 3 robôs;
+- valida que `FUUT`/`SU` não podem mover (`ROLE_NOT_ALLOWED`);
+- no `MUUT`: `start_record` → sequência de `go_to_point` → `stop_record` → `play_route`;
+- desabilita coleta nos 3 e verifica status final.
+
 ---
 
 ## O que falta para "terminar"
