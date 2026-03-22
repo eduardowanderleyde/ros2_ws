@@ -338,6 +338,29 @@ python3 scripts/test_roles_automatic.py --muut tb1 --fuut tb2 --su tb3
 
 **Obs. DDS:** com vários participantes no mesmo host, às vezes é preciso ajustar CycloneDDS/Fast-DDS (limites de participantes); se um robô “some” do `ros2 node list`, verifique isso antes de culpar o fleet.
 
+### Experimento reproduzível (1 robô): gravar percurso → repetir → comparar bags
+
+Objetivo: **percurso salvo em YAML** + **duas (ou mais) coletas rosbag2** no mesmo trajeto, para medir repetibilidade — sem UI.
+
+**Fase A — gravar** (coleta ligada + `start_record` + sequência de `go_to_point` + `stop_record`):
+
+```bash
+source install/setup.bash
+python3 scripts/experiment_repetability.py record \
+  --robot tb1 --route percurso1_tb1 \
+  --points "0.5,0,0;1.0,0,0;1.5,0.5,0;2.0,0.5,0"
+```
+
+Saída esperada: `routes/tb1/percurso1_tb1.yaml` e bag em `collections/tb1/<timestamp>/`.
+
+**Fase B — reproduzir** (nova coleta com `play_route`):
+
+```bash
+python3 scripts/experiment_repetability.py replay --robot tb1 --route percurso1_tb1
+```
+
+Ajuste os pontos (`--points`) ao mapa/mundo (valores no frame `map`). Use `--skip-collection` só para testar navegação sem gravar bag.
+
 ### Teste automático por papéis (MUUT/FUUT/SU), sem UI
 
 Com `tb1=MUUT`, `tb2=FUUT`, `tb3=SU` (definidos em `src/fleet_orchestrator/config/roles.yaml`):
