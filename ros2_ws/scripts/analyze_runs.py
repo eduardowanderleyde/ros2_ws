@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
 Pós-processamento de rosbag2 gravados pelo fleet_data_collector: extrai trajetória de odometria,
-calcula métricas simples (duração, comprimento do percurso, RMSE entre execuções) e gera gráfico.
+calcula métricas (duração, comprimento, RMSE entre pares, erro no ponto final vs referência,
+desvio médio ponto a ponto vs referência, razão de duração), exporta CSV por run e gera gráfico.
 
 Uso (com workspace ROS 2 sourceado):
   source install/setup.bash
   python3 scripts/analyze_runs.py collections/default/run_a collections/default/run_b
   python3 scripts/analyze_runs.py "collections/default/*" --output-dir analysis_out
+
+A **referência** é sempre o **primeiro** bag da lista (índice 0): métricas `vs_reference` comparam
+as demais execuções a ela.
 
 Dependências Python: numpy; matplotlib opcional para PNG (--no-plot se não tiver).
 
@@ -168,7 +172,25 @@ def _rmse(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.sum((a - b) ** 2, axis=1))))
 
 
-def analyze_bag(label: str, bag_dir: Path) -> Tuple[RunStats, np.ndarray]:
+def _mean_pointwise_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """Distância euclidiana média entre pontos homólogos (mesmo N)."""
+    d = np.sqrt(np.sum((a - b) ** 2, axis=1))
+    return float(np.mean(d))
+
+
+def _safe_label_file(s: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in s)
+
+
+def _write_trajectory_csv(path: Path, t: np.ndarray, xy: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("t_sec,x_m,y_m\n")
+        for i in range(len(t)):
+            f.write(f"{t[i]:.6f},{xy[i, 0]:.6f},{xy[i, 1]:.6f}\n")
+
+
+def analyze_bag(label: str, bag_dir: Path) -> Tuple[RunStats, np.ndarray, np.ndarray]:
     topic, t, x, y = _read_odom_xy(bag_dir)
     duration = float(t[-1] - t[0]) if len(t) > 1 else 0.0
     plen = _path_length(x, y)
@@ -183,7 +205,7 @@ def analyze_bag(label: str, bag_dir: Path) -> Tuple[RunStats, np.ndarray]:
         start_xy=(float(x[0]), float(y[0])),
         end_xy=(float(x[-1]), float(y[-1])),
     )
-    return stats, xy
+    return stats, xy, t
 
 
 def main() -> int:
@@ -210,6 +232,11 @@ def main() -> int:
         action="store_true",
         help="Não gera PNG (útil sem matplotlib)",
     )
+    parser.add_argument(
+        "--no-csv",
+        action="store_true",
+        help="Não grava trajectory_<label>.csv por run",
+    )
     args = parser.parse_args()
 
     try:
@@ -234,16 +261,25 @@ def main() -> int:
 
     all_stats: List[RunStats] = []
     trajectories: List[np.ndarray] = []
+    times: List[np.ndarray] = []
 
     for label, bdir in zip(labels, bag_paths):
         print(f"Lendo {label} ... ({bdir})")
         try:
-            st, xy = analyze_bag(label, bdir)
+            st, xy, t_rel = analyze_bag(label, bdir)
             all_stats.append(st)
             trajectories.append(xy)
+            times.append(t_rel)
         except Exception as ex:
             print(f"[FALHOU] {bdir}: {ex}", file=sys.stderr)
             return 1
+
+    if not args.no_csv:
+        csv_dir = out_dir / "trajectories_csv"
+        for t_rel, xy, lab in zip(times, trajectories, labels):
+            fn = csv_dir / f"trajectory_{_safe_label_file(lab)}.csv"
+            _write_trajectory_csv(fn, t_rel, xy)
+        print(f"[OK] CSVs: {csv_dir}/")
 
     # RMSE pairwise
     n = len(trajectories)
@@ -258,6 +294,31 @@ def main() -> int:
             rmse_matrix[j][i] = r
         rmse_matrix[i][i] = 0.0
 
+    # vs primeira execução (referência)
+    ref_idx = 0
+    d0 = all_stats[ref_idx].duration_sec
+    d0 = d0 if d0 > 1e-6 else 1e-6
+    end_ref = np.array(all_stats[ref_idx].end_xy, dtype=np.float64)
+    vs_reference: List[dict] = []
+    for i in range(n):
+        end_i = np.array(all_stats[i].end_xy, dtype=np.float64)
+        final_err = float(np.linalg.norm(end_i - end_ref))
+        dur_ratio = float(all_stats[i].duration_sec / d0)
+        entry: dict = {
+            "label": labels[i],
+            "final_endpoint_error_m": final_err,
+            "duration_sec": all_stats[i].duration_sec,
+            "duration_ratio_vs_ref": dur_ratio,
+        }
+        if i != ref_idx:
+            a, b = _resample_pair(trajectories[ref_idx], trajectories[i])
+            entry["rmse_vs_ref_m"] = _rmse(a, b)
+            entry["mean_pointwise_distance_vs_ref_m"] = _mean_pointwise_distance(a, b)
+        else:
+            entry["rmse_vs_ref_m"] = 0.0
+            entry["mean_pointwise_distance_vs_ref_m"] = 0.0
+        vs_reference.append(entry)
+
     def _run_to_json(s: RunStats) -> dict:
         d = asdict(s)
         d["start_xy"] = list(d["start_xy"])
@@ -266,8 +327,11 @@ def main() -> int:
 
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "reference_run_index": ref_idx,
+        "reference_label": labels[ref_idx],
         "runs": [_run_to_json(s) for s in all_stats],
         "pairwise_rmse_m": rmse_matrix,
+        "vs_reference": vs_reference,
         "labels": labels,
     }
     summary_path = out_dir / "summary.json"
@@ -286,8 +350,24 @@ def main() -> int:
             ax.set_xlabel("x (m)")
             ax.set_ylabel("y (m)")
             ax.set_title("Trajetórias (odom) — comparação entre runs")
-            ax.legend()
+            ax.legend(loc="best", fontsize=9)
             ax.grid(True, alpha=0.3)
+            # Caixa de texto: RMSE vs referência (primeiro bag)
+            if n > 1:
+                lines = [f"Ref: {labels[0]}"]
+                for i in range(1, n):
+                    r = vs_reference[i].get("rmse_vs_ref_m", 0.0)
+                    fe = vs_reference[i].get("final_endpoint_error_m", 0.0)
+                    lines.append(f"{labels[i]}: RMSE={r:.3f}m  Δfim={fe:.3f}m")
+                ax.text(
+                    0.02,
+                    0.98,
+                    "\n".join(lines),
+                    transform=ax.transAxes,
+                    fontsize=8,
+                    verticalalignment="top",
+                    bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+                )
             png_path = out_dir / "trajectory_overlay.png"
             fig.savefig(png_path, dpi=150, bbox_inches="tight")
             plt.close(fig)
@@ -306,6 +386,14 @@ def main() -> int:
             for j in range(i + 1, n):
                 r = rmse_matrix[i][j]
                 print(f"  {labels[i]} vs {labels[j]}: {r:.4f} m")
+        print(f"\n--- Vs referência ({labels[0]}) ---")
+        for v in vs_reference:
+            print(
+                f"  {v['label']}: RMSE={v['rmse_vs_ref_m']:.4f} m  "
+                f"dist_média_pt={v['mean_pointwise_distance_vs_ref_m']:.4f} m  "
+                f"Δfim={v['final_endpoint_error_m']:.4f} m  "
+                f"duração×={v['duration_ratio_vs_ref']:.3f}"
+            )
 
     return 0
 

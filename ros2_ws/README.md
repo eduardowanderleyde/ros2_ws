@@ -392,10 +392,13 @@ python3 scripts/analyze_runs.py \
 
 Saídas:
 
-- `analysis_out/summary.json` — duração, comprimento do percurso, matriz `pairwise_rmse_m`
-- `analysis_out/trajectory_overlay.png` — trajetórias (x,y) sobrepostas (se matplotlib instalado)
+- `analysis_out/summary.json` — duração, comprimento, `pairwise_rmse_m`, **`vs_reference`** (primeiro bag = referência: RMSE, distância média ponto a ponto, erro no **ponto final**, razão de **duração** vs ref)
+- `analysis_out/trajectories_csv/trajectory_<label>.csv` — colunas `t_sec,x_m,y_m` por run (use `--no-csv` para desligar)
+- `analysis_out/trajectory_overlay.png` — trajetórias sobrepostas + caixa de texto com RMSE e Δfim vs referência (se matplotlib instalado)
 
 Use `--no-plot` se não quiser gráfico. O script procura automaticamente um tópico `*odom*` com tipo `nav_msgs/msg/Odometry`.
+
+**Protocolo experimental (dissertação / paper):** ver [`docs/EXPERIMENT_PROTOCOL.md`](docs/EXPERIMENT_PROTOCOL.md).
 
 ### Teste automático por papéis (MUUT/FUUT/SU), sem UI
 
