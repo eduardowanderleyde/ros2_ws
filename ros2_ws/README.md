@@ -377,6 +377,26 @@ ros2 bag info collections/default/<pasta>   # ou collections/tb1/...
 
 Ajuste os pontos (`--points`) ao mapa/mundo (valores no frame `map`). Use `--skip-collection` só para testar navegação sem gravar bag.
 
+### Pós-processamento: trajetória e métricas entre runs (`analyze_runs.py`)
+
+Depois de várias execuções (vários diretórios de bag em `collections/...`), compare trajetórias de **odometria** e uma métrica simples de **RMSE** entre pares (subamostragem uniforme):
+
+```bash
+source install/setup.bash
+pip install matplotlib   # opcional, para PNG
+python3 scripts/analyze_runs.py \
+  collections/default/run_a collections/default/run_b \
+  --output-dir analysis_out \
+  --labels exec1 exec2
+```
+
+Saídas:
+
+- `analysis_out/summary.json` — duração, comprimento do percurso, matriz `pairwise_rmse_m`
+- `analysis_out/trajectory_overlay.png` — trajetórias (x,y) sobrepostas (se matplotlib instalado)
+
+Use `--no-plot` se não quiser gráfico. O script procura automaticamente um tópico `*odom*` com tipo `nav_msgs/msg/Odometry`.
+
 ### Teste automático por papéis (MUUT/FUUT/SU), sem UI
 
 Com `tb1=MUUT`, `tb2=FUUT`, `tb3=SU` (definidos em `src/fleet_orchestrator/config/roles.yaml`):
