@@ -21,7 +21,7 @@ Requisitos: sim + Nav2 + fleet (orchestrator + collector), TF map ok, papel MUUT
 
 Pontos: triples x,y,yaw_rad separados por ';' (yaw pode ser 0).
 
-Opcional: --export run_summary.json (metadados para dissertação / pós-processamento).
+Opcional: --export run_summary.json (metadados; inclui rosbag_path quando o disable_collection devolve o caminho do bag).
 """
 from __future__ import annotations
 
@@ -34,6 +34,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformListener, TransformException
 
 from fleet_msgs.msg import FleetStatus
 from fleet_msgs.srv import (
@@ -76,6 +79,8 @@ class FleetExperimentNode(Node):
         super().__init__("experiment_repeatability")
         self.last_status: Optional[FleetStatus] = None
         self.create_subscription(FleetStatus, "fleet/status", self._cb, 10)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
     def _cb(self, msg: FleetStatus) -> None:
         self.last_status = msg
@@ -107,11 +112,38 @@ class FleetExperimentNode(Node):
             time.sleep(0.05)
         return False
 
+    def wait_tf_available(
+        self, global_frame: str, base_frame: str, timeout_sec: float
+    ) -> bool:
+        """Espera até existir TF global_frame -> base_frame (transform mais recente)."""
+        t0 = time.time()
+        while time.time() - t0 < timeout_sec:
+            try:
+                self.tf_buffer.lookup_transform(
+                    global_frame,
+                    base_frame,
+                    Time(),  # latest transform
+                    timeout=Duration(seconds=0.2),
+                )
+                return True
+            except TransformException:
+                pass
+            rclpy.spin_once(self, timeout_sec=0.1)
+        return False
+
 
 def _print(ok: bool, msg: str, detail: str = "") -> None:
     tag = "OK" if ok else "FALHOU"
     extra = f" — {detail}" if detail else ""
     print(f"[{tag}] {msg}{extra}")
+
+
+def _rosbag_path_from_disable_message(msg: Optional[str]) -> Optional[str]:
+    """Extrai o caminho do bag da resposta do disable_collection (texto '... Bag: <path>')."""
+    if not msg or "Bag:" not in msg:
+        return None
+    tail = msg.split("Bag:", 1)[1].strip()
+    return tail if tail else None
 
 
 def _write_export(path: str, payload: Dict[str, Any]) -> None:
@@ -140,12 +172,14 @@ def cmd_record(args: argparse.Namespace) -> int:
     try:
         print("\n=== Fase A: gravar percurso (coleta + record + waypoints) ===")
         print(f"robot={rid!r} route={args.route} pontos={len(points)}")
+        print(f"topics={args.topics} skip_collection={args.skip_collection} export={args.export!r}")
 
         if not args.skip_collection:
             req = EnableCollection.Request()
             req.robot_id = rid
             req.topics = args.topics
             req.output_mode = "rosbag2"
+            print("[TRACE] Chamando service enable_collection ...")
             resp, ok, err = node.call_srv(EnableCollection, "enable_collection", req)
             good = ok and resp is not None and resp.success
             _print(good, "enable_collection", (resp.message if resp else err))
@@ -166,6 +200,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                             "success": False,
                             "failures_reported": fails,
                             "disable_collection_message": disable_msg,
+                            "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                         },
                     )
                 return code
@@ -174,6 +209,7 @@ def cmd_record(args: argparse.Namespace) -> int:
         req_sr = StartRecord.Request()
         req_sr.robot_id = rid
         req_sr.route_name = args.route
+        print("[TRACE] Chamando service start_record ...")
         resp, ok, err = node.call_srv(StartRecord, "start_record", req_sr)
         good = ok and resp is not None and resp.success
         _print(good, "start_record", (resp.message if resp else err))
@@ -194,12 +230,19 @@ def cmd_record(args: argparse.Namespace) -> int:
                         "success": False,
                         "failures_reported": fails,
                         "disable_collection_message": disable_msg,
+                        "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                     },
                 )
             return code
 
+        # Evita falhas transitórias de TF (TF_ERROR 202) antes do 1º goal.
+        print("[TRACE] Esperando TF map->base_link ...")
+        tf_ok = node.wait_tf_available("map", "base_link", timeout_sec=20.0)
+        _print(tf_ok, "TF map->base_link disponível")
+
         try:
             for i, (x, y, yaw) in enumerate(points, start=1):
+                print(f"[TRACE] go_to_point wp{i}: x={x:.3f} y={y:.3f} yaw={yaw:.3f}")
                 req_g = GoToPoint.Request()
                 req_g.robot_id = rid
                 req_g.x = x
@@ -214,12 +257,16 @@ def cmd_record(args: argparse.Namespace) -> int:
                 nav_started = node.wait_nav_state(rid, "navigating", timeout_sec=12.0)
                 _print(nav_started, f"wp{i} estado navigating")
                 fails += int(not nav_started)
-                nav_done = node.wait_nav_state(rid, "idle", timeout_sec=args.wait_goal)
-                _print(nav_done, f"wp{i} voltou a idle")
+                # Durante record, o fleet mostra `recording` enquanto a coleta está ativa.
+                # Depois que o Nav2 termina, `is_navigating` vira False, mas `is_recording`
+                # permanece True até o stop_record. Por isso "idle" pode nunca acontecer aqui.
+                nav_done = node.wait_nav_state(rid, "recording", timeout_sec=args.wait_goal)
+                _print(nav_done, f"wp{i} voltou a recording (nav finalizado)")
                 fails += int(not nav_done)
         finally:
             req_st = StopRecord.Request()
             req_st.robot_id = rid
+            print("[TRACE] Chamando service stop_record ...")
             resp, ok, err = node.call_srv(StopRecord, "stop_record", req_st)
             good = ok and resp is not None and resp.success and "Route length: 0" not in (resp.message or "")
             _print(good, "stop_record", (resp.message if resp else err))
@@ -251,6 +298,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                     "success": code == 0,
                     "failures_reported": fails,
                     "disable_collection_message": disable_msg,
+                    "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                 },
             )
         return code
@@ -269,12 +317,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
     try:
         print("\n=== Fase B: reproduzir percurso (coleta + play_route) ===")
         print(f"robot={rid!r} route={args.route}")
+        print(f"topics={args.topics} skip_collection={args.skip_collection} export={args.export!r}")
 
         if not args.skip_collection:
             req = EnableCollection.Request()
             req.robot_id = rid
             req.topics = args.topics
             req.output_mode = "rosbag2"
+            print("[TRACE] Chamando service enable_collection ...")
             resp, ok, err = node.call_srv(EnableCollection, "enable_collection", req)
             good = ok and resp is not None and resp.success
             _print(good, "enable_collection", (resp.message if resp else err))
@@ -294,14 +344,19 @@ def cmd_replay(args: argparse.Namespace) -> int:
                             "success": False,
                             "failures_reported": fails,
                             "disable_collection_message": disable_msg,
+                            "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                         },
                     )
                 return code
             time.sleep(1.0)
 
+        print("[TRACE] Warmup após enable_collection (sleep 5s) ...")
+        time.sleep(5.0)
+
         req_p = PlayRoute.Request()
         req_p.robot_id = rid
         req_p.route_name = args.route
+        print("[TRACE] Chamando service play_route ...")
         resp, ok, err = node.call_srv(PlayRoute, "play_route", req_p, timeout_sec=20.0)
         good = ok and resp is not None and resp.success
         _print(good, "play_route", (resp.message if resp else err))
@@ -317,6 +372,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         if not args.skip_collection:
             req_d = DisableCollection.Request()
             req_d.robot_id = rid
+            print("[TRACE] Chamando service disable_collection ...")
             resp, ok, err = node.call_srv(DisableCollection, "disable_collection", req_d)
             good = ok and resp is not None and resp.success
             _print(good, "disable_collection", (resp.message if resp else err))
@@ -339,6 +395,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     "success": code == 0,
                     "failures_reported": fails,
                     "disable_collection_message": disable_msg,
+                    "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                 },
             )
         return code
@@ -382,7 +439,7 @@ def main() -> int:
     pr.add_argument(
         "--export",
         metavar="FILE.json",
-        help="Salva metadados do run (rota esperada, pontos, sucesso, mensagem disable_collection)",
+        help="Salva metadados do run (rota, pontos, sucesso, rosbag_path quando disponível)",
     )
     pr.set_defaults(func=cmd_record)
 

@@ -5,7 +5,7 @@ Interface web para o fleet: mapa clicável (go_to_point), botões de rota e stat
 ## Pré-requisitos
 
 - ROS 2 Jazzy com workspace buildado (`colcon build --merge-install`)
-- Fleet em execução: `ros2 launch fleet_orchestrator fleet.launch.py` (ou com `--params-file` para sim)
+- Fleet em execução: `ros2 launch fleet_orchestrator fleet.launch.py` (sim 1 robô: `single_robot_sim:=true`)
 
 ## Backend (FastAPI)
 

@@ -89,7 +89,9 @@ Se o simulador usa `map`, `base_link` e `/navigate_through_poses` (sem prefixo t
 - **Collector:** `robots:=['']`. Tópicos `/scan`, `/odom`; bags em `collections/default/`.
 - Nos services use `robot_id: ''` (string vazia). `list_robots` retorna `['']` ou exibe como "default".
 
-**Config YAML pronta para sim:** `fleet_orchestrator/config/single_robot_sim.yaml` (robots: [''], use_shared_map_frame: true). Após o build, use com o launch: `ros2 launch fleet_orchestrator fleet.launch.py --params-file install/fleet_orchestrator/share/fleet_orchestrator/config/single_robot_sim.yaml` ou rode os nós com `--params-file <path>/single_robot_sim.yaml`.
+**Config YAML pronta para sim:** `fleet_orchestrator/config/single_robot_sim.yaml` (robots: [''], use_shared_map_frame: true). Após o build, use o launch com **`single_robot_sim:=true`** (o `ros2 launch` não aceita `--params-file` como o `ros2 run`):  
+`ros2 launch fleet_orchestrator fleet.launch.py single_robot_sim:=true`  
+Alternativa: `ros2 run ... --ros-args --params-file $(ros2 pkg prefix fleet_orchestrator)/share/fleet_orchestrator/config/single_robot_sim.yaml` em cada nó.
 
 **Script de teste:** `python3 scripts/test_fleet_cases.py --single-robot` usa `robot_id: ''` em todos os testes.
 
@@ -256,7 +258,7 @@ source install/setup.bash
 ros2 launch fleet_orchestrator fleet.launch.py use_shared_map_frame:=true
 ```
 
-Para `robots: ['']` e demais parâmetros do arquivo `fleet_orchestrator/config/single_robot_sim.yaml`, passe-os nos nós com `ros2 run ... --ros-args --params-file $(ros2 pkg prefix fleet_orchestrator)/share/fleet_orchestrator/config/single_robot_sim.yaml` ou ajuste o `fleet.launch.py` para incluir esse YAML (o `ros2 launch` não aceita `--params-file` como flag global da mesma forma que `ros2 run`).
+Para sim single-robot, use `ros2 launch fleet_orchestrator fleet.launch.py single_robot_sim:=true` (carrega o YAML instalado). Ou `ros2 run` com `--ros-args --params-file $(ros2 pkg prefix fleet_orchestrator)/share/fleet_orchestrator/config/single_robot_sim.yaml` em cada nó.
 
 ### Terminal 3 — Teste
 
@@ -366,7 +368,7 @@ python3 scripts/experiment_repeatability.py record --single-robot --route percur
 python3 scripts/experiment_repeatability.py replay --single-robot --route percurso1_tb1
 ```
 
-**Metadados para dissertação / pós-processamento:** `--export run_1.json` grava JSON com rota esperada, pontos, sucesso e mensagem do `disable_collection` (caminho do bag costuma vir no log).
+**Metadados para dissertação / pós-processamento:** `--export run_1.json` grava JSON com rota esperada, pontos, sucesso, mensagem do `disable_collection` e **`rosbag_path`** quando o coletor devolve o caminho do bag no `disable`.
 
 **Conferir artefatos:**
 
@@ -383,11 +385,11 @@ Depois de várias execuções (vários diretórios de bag em `collections/...`),
 
 ```bash
 source install/setup.bash
-pip install matplotlib   # opcional, para PNG
+python3 -c "import matplotlib; print(matplotlib.__version__)"   # se falhar, instale matplotlib (venv/sistema)
 python3 scripts/analyze_runs.py \
   collections/default/run_a collections/default/run_b \
   --output-dir analysis_out \
-  --labels exec1 exec2
+  --labels baseline replay_01
 ```
 
 Saídas:

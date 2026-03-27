@@ -1,11 +1,12 @@
 # Config para 1 robô em simulação (sem namespace: map, base_link, /navigate_through_poses).
-# Uso: ros2 launch fleet_orchestrator fleet.launch.py params_file:=config/single_robot_sim.yaml
-# Ou: ros2 run fleet_orchestrator fleet_orchestrator --ros-args --params-file src/fleet_orchestrator/config/single_robot_sim.yaml
+# Launch (recomendado): ros2 launch fleet_orchestrator fleet.launch.py single_robot_sim:=true
+# Nó isolado: ros2 run fleet_orchestrator fleet_orchestrator --ros-args --params-file <path>/single_robot_sim.yaml
 
 fleet_orchestrator:
   ros__parameters:
     robots: [""]
     use_shared_map_frame: true
+    use_sim_time: true
     routes_dir: "routes"
     record_rate_hz: 5.0
     min_dist_m: 0.10
@@ -14,4 +15,6 @@ fleet_orchestrator:
 sensor_collector:
   ros__parameters:
     robots: [""]
-    collections_dir: "collections"
+    # Use caminho absoluto para evitar dependência do working directory do processo.
+    collections_dir: "/home/eduardo/Documentos/ros2_ws/ros2_ws/collections"
+    use_sim_time: true

@@ -194,6 +194,22 @@ class FleetOrchestrator(Node):
 
     def _global_frame(self, robot_id: str) -> str:
         if not robot_id:
+            # Em alguns setups (ex.: simulação sem inicialização completa de AMCL),
+            # o TF pode não disponibilizar `map`. Para manter o experimento rodando,
+            # fazemos fallback para `odom` quando `map` não existir.
+            base_frame = self._base_frame(robot_id)
+            # Usamos um timeout maior do que o lookup para reduzir "corridas" no start.
+            for candidate in ("map", "odom"):
+                try:
+                    self.tf_buffer.lookup_transform(
+                        candidate,
+                        base_frame,
+                        Time(),
+                        timeout=Duration(seconds=1.0),
+                    )
+                    return candidate
+                except TransformException:
+                    continue
             return "map"
         if self.use_shared_map_frame:
             return "map"
@@ -221,11 +237,13 @@ class FleetOrchestrator(Node):
             rs.robot_id = rid if rid else "default"
             rs.role = self._roles.get(rid, "MUUT")
             state = self._state[rid]
-            if state.is_recording:
-                rs.nav_state = "recording"
-                rs.current_route = state.route_name or ""
-            elif state.is_navigating:
+            # Prioriza navegação: durante "record" a coleta ainda fica ativa,
+            # mas queremos que o status mostre "navigating" enquanto o Nav2 está a executar.
+            if state.is_navigating:
                 rs.nav_state = "navigating"
+                rs.current_route = state.route_name or ""
+            elif state.is_recording:
+                rs.nav_state = "recording"
                 rs.current_route = state.route_name or ""
             elif state._last_error:
                 rs.nav_state = "failed"
@@ -291,6 +309,13 @@ class FleetOrchestrator(Node):
         state.route_name = request.route_name.strip() or "route1"
 
         self.get_logger().info(f"[{robot_id}] Recording started. route_name={state.route_name}")
+        # Debug: ajuda a explicar falhas de TF (map->base_link vs fallback para odom).
+        gf = self._global_frame(robot_id)
+        bf = self._base_frame(robot_id)
+        self.get_logger().info(
+            f"[{robot_id}] TF frames selected for recording: global_frame={gf} base_frame={bf} "
+            f"(use_shared_map_frame={self.use_shared_map_frame})"
+        )
         response.success = True
         response.message = f"Recording started for {robot_id}."
         response.error_code = ""
@@ -349,11 +374,6 @@ class FleetOrchestrator(Node):
             return response
 
         state = self._state[robot_id]
-        if state.is_recording:
-            response.success = False
-            response.message = "Stop recording before playing."
-            response.error_code = ErrorCode.ALREADY_RECORDING
-            return response
         if state.is_navigating:
             response.success = False
             response.message = "Robot is already navigating."
@@ -377,6 +397,26 @@ class FleetOrchestrator(Node):
             return response
 
         goal_msg = NavigateThroughPoses.Goal()
+        # Ajusta stamp das poses para um timestamp que exista no TF,
+        # reduzindo "TF extrapolation" e TF_ERROR no Nav2.
+        stamp_msg = None
+        try:
+            global_frame = state.route[0].header.frame_id if state.route else self._global_frame(robot_id)
+            base_frame = self._base_frame(robot_id)
+            tf = self.tf_buffer.lookup_transform(
+                global_frame,
+                base_frame,
+                Time(),
+                timeout=Duration(seconds=0.25),
+            )
+            stamp_msg = tf.header.stamp
+        except TransformException:
+            stamp_msg = None
+
+        if stamp_msg is not None:
+            for p in state.route:
+                p.header.stamp = stamp_msg
+
         goal_msg.poses = state.route
 
         state._last_error = ""
@@ -412,11 +452,6 @@ class FleetOrchestrator(Node):
             return response
 
         state = self._state[robot_id]
-        if state.is_recording:
-            response.success = False
-            response.message = "Stop recording before sending goal."
-            response.error_code = ErrorCode.ALREADY_RECORDING
-            return response
         if state.is_navigating:
             response.success = False
             response.message = "Robot is already navigating. Cancel first or wait."
@@ -432,11 +467,23 @@ class FleetOrchestrator(Node):
             return response
 
         frame_id = self._global_frame(robot_id)
+        base_frame = self._base_frame(robot_id)
         yaw = float(request.yaw) if request.yaw != 0.0 else 0.0
 
         pose = PoseStamped()
         pose.header.frame_id = frame_id
-        pose.header.stamp = self.get_clock().now().to_msg()
+        stamp_msg = None
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                frame_id,
+                base_frame,
+                Time(),
+                timeout=Duration(seconds=0.25),
+            )
+            stamp_msg = tf.header.stamp
+        except TransformException:
+            stamp_msg = None
+        pose.header.stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
         pose.pose.position.x = float(request.x)
         pose.pose.position.y = float(request.y)
         pose.pose.position.z = 0.0
@@ -445,9 +492,18 @@ class FleetOrchestrator(Node):
         goal_msg = NavigateThroughPoses.Goal()
         goal_msg.poses = [pose]
 
+        # Durante record queremos que o YAML salvo contenha também os
+        # waypoints planejados (mesmo que Nav2 falhe rápido). Isso garante
+        # repetibilidade do percurso ao fazer replay.
+        if state.is_recording:
+            state.route.append(pose)
+
         state._last_error = ""
         state.is_navigating = True
-        self.get_logger().info(f"[{robot_id}] GoToPoint ({request.x:.2f}, {request.y:.2f}) -> Nav2.")
+        self.get_logger().info(
+            f"[{robot_id}] GoToPoint ({request.x:.2f}, {request.y:.2f}, yaw={yaw:.2f}) "
+            f"frame_id={frame_id} -> Nav2."
+        )
 
         send_future = client.send_goal_async(
             goal_msg, feedback_callback=lambda fb: self._nav2_feedback_cb(robot_id, fb)
@@ -554,7 +610,15 @@ class FleetOrchestrator(Node):
             self._state[robot_id].is_navigating = False
             return
 
-        self.get_logger().info(f"[{robot_id}] Nav2 finished. status={status}")
+        # Nav2 action can fail fast; log the detailed result fields for diagnostics.
+        try:
+            err_code = getattr(result, "error_code", None)
+            err_msg = getattr(result, "error_msg", "")
+            self.get_logger().info(
+                f"[{robot_id}] Nav2 finished. status={status} error_code={err_code} error_msg={err_msg!r}"
+            )
+        except Exception:
+            self.get_logger().info(f"[{robot_id}] Nav2 finished. status={status}")
         self._state[robot_id].is_navigating = False
         self._state[robot_id]._goal_handle = None
         self._state[robot_id]._last_error = ""

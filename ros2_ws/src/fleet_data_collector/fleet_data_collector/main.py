@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Type
@@ -132,6 +133,9 @@ class SensorCollector(Node):
             writer = rosbag2_py.SequentialWriter()
             storage_options = rosbag2_py.StorageOptions(uri=bag_uri, storage_id="mcap")
             converter_options = rosbag2_py.ConverterOptions("", "")
+            self.get_logger().info(
+                f"[{robot_id}] enable_collection: opening rosbag writer storage_id=mcap uri={bag_uri}"
+            )
             writer.open(storage_options, converter_options)
 
             topic_id = 0
@@ -179,6 +183,15 @@ class SensorCollector(Node):
             response.error_code = ""
         except Exception as e:
             self.get_logger().error(f"Enable collection failed: {e}")
+            self.get_logger().error(traceback.format_exc())
+            # Remove partial bag directory to keep subsequent runs clean.
+            try:
+                if os.path.isdir(bag_uri):
+                    import shutil
+
+                    shutil.rmtree(bag_uri)
+            except Exception:
+                pass
             response.success = False
             response.message = str(e)
             response.error_code = "ENABLE_FAILED"
