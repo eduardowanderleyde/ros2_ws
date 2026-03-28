@@ -7,6 +7,9 @@ log/
 routes/
 collections/
 
+# relatórios locais do script diagnose_nav_fleet.sh
+diagnostics/
+
 # Python
 __pycache__/
 *.py[cod]
