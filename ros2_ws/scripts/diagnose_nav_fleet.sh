@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Diagnóstico rápido: /odom, TF map->base_link, /cmd_vel.
-# Uso: com Gazebo+Nav2+fleet já a correr, noutro terminal:
+# Diagnóstico: /odom, TF (odom->base_footprint, map->odom), /cmd_vel.
+# TurtleBot3: child_frame de /odom costuma ser base_footprint; o frame "map" no TF
+# só existe com AMCL localizado (ex.: 2D Pose Estimate no RViz).
+# Uso: com Gazebo+Nav2 (+ fleet opcional) a correr:
 #   bash scripts/diagnose_nav_fleet.sh
 # Opcional: DIAG_OUT=/tmp/meus_diag.log bash scripts/diagnose_nav_fleet.sh
+#
+# timeout usa SIGINT para o tf2_echo terminar sem disparar tanto o "ros2 crash" do Ubuntu.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -48,16 +52,31 @@ else
   log "[A] SKIP: tópico /odom não existe (simulação/Nav2 provavelmente parados)."
 fi
 
-section "B — TF map -> base_link (até 6s, primeira transformação válida)"
+section "B1 — TF odom -> base_footprint (~5s, deve existir com Gazebo+Nav2)"
 if ros2 topic list 2>&1 | grep -qx '/tf' || ros2 topic list 2>&1 | grep -qx '/tf_static'; then
-  timeout 6 ros2 run tf2_ros tf2_echo map base_link 2>&1 | head -40 || log "[B] timeout ou frame map/base_link indisponível."
+  timeout -s INT 5 ros2 run tf2_ros tf2_echo odom base_footprint 2>&1 | head -30 || log "[B1] falhou ou timeout."
 else
-  log "[B] SKIP: sem /tf"
+  log "[B1] SKIP: sem /tf"
 fi
 
-section "C — /cmd_vel (uma mensagem, timeout 8s)"
+section "B2 — TF map -> odom (~5s, AMCL; se falhar: 2D Pose Estimate no RViz)"
+if ros2 topic list 2>&1 | grep -qx '/tf' || ros2 topic list 2>&1 | grep -qx '/tf_static'; then
+  timeout -s INT 5 ros2 run tf2_ros tf2_echo map odom 2>&1 | head -30 || log "[B2] falhou ou timeout."
+  log "[B2] Nota: se \"map\" não existir, o AMCL ainda não publica map->odom. No RViz: 2D Pose Estimate."
+else
+  log "[B2] SKIP: sem /tf"
+fi
+
+section "B3 — TF map -> base_footprint (cadeia completa; requer B2 ok)"
+if ros2 topic list 2>&1 | grep -qx '/tf' || ros2 topic list 2>&1 | grep -qx '/tf_static'; then
+  timeout -s INT 5 ros2 run tf2_ros tf2_echo map base_footprint 2>&1 | head -30 || log "[B3] falhou (normal se B2 falhou)."
+else
+  log "[B3] SKIP: sem /tf"
+fi
+
+section "C — /cmd_vel (uma mensagem, timeout 8s; vazio = normal sem goal de navegação)"
 if ros2 topic list 2>&1 | grep -qx '/cmd_vel'; then
-  ros2 topic echo /cmd_vel --once --timeout 8 2>&1 || log "[C] sem cmd_vel no intervalo (Nav2 pode não estar a comandar)."
+  ros2 topic echo /cmd_vel --once --timeout 8 2>&1 || log "[C] sem mensagens (esperado se o robô não está a receber comando)."
 else
   log "[C] SKIP: tópico /cmd_vel não existe."
 fi
