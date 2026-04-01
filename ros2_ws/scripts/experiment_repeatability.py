@@ -39,6 +39,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.parameter import Parameter
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
 from nav_msgs.msg import Odometry
@@ -90,7 +91,10 @@ class FleetExperimentNode(Node):
         self.last_status: Optional[FleetStatus] = None
         self.last_odom: Optional[Odometry] = None
         self.create_subscription(FleetStatus, "fleet/status", self._cb, 10)
-        self.create_subscription(Odometry, "odom", self._cb_odom, 30)
+        # /odom em sim costuma ser BEST_EFFORT; depth 30 RELIABLE pode não receber nada.
+        self.create_subscription(
+            Odometry, "odom", self._cb_odom, qos_profile_sensor_data
+        )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
