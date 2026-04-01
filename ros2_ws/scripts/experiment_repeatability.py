@@ -174,6 +174,16 @@ class FleetExperimentNode(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
         return False
 
+    def snapshot_odom_xy(self, spin_sec: float = 0.45) -> Optional[Tuple[float, float]]:
+        """Após spin breve, devolve (x,y) do último /odom ou None."""
+        t0 = time.time()
+        while time.time() - t0 < spin_sec:
+            rclpy.spin_once(self, timeout_sec=0.02)
+        if self.last_odom is None:
+            return None
+        p = self.last_odom.pose.pose.position
+        return (float(p.x), float(p.y))
+
     def wait_motion_detected(self, min_dist_m: float, timeout_sec: float) -> Tuple[bool, float]:
         """
         Aguarda deslocamento no /odom e retorna (ok, path_length_m_estimate).
@@ -459,6 +469,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
         _print(good, "play_route", (resp.message if resp else err))
         fails += int(not good)
         if good:
+            # Replay rápido pode ir a idle antes de medirmos; Δpose início→fim cobre esse caso.
+            odom_start_xy: Optional[Tuple[float, float]] = None
+            if args.require_motion:
+                odom_start_xy = node.snapshot_odom_xy(0.45)
+                if odom_start_xy is None:
+                    _print(False, "baseline /odom para require-motion")
+                    fails += 1
+                    run_error_code = "NO_ODOM_MSG"
+
             nav_started = node.wait_nav_state(
                 rid, "navigating", timeout_sec=args.replay_nav_start_timeout
             )
@@ -476,22 +495,35 @@ def cmd_replay(args: argparse.Namespace) -> int:
             else:
                 _print(True, "navegação iniciou (navigating)")
             fails += int(not nav_started)
-            if args.require_motion and nav_started:
-                moved, dist_m = node.wait_motion_detected(
-                    min_dist_m=args.motion_min_dist,
-                    timeout_sec=args.motion_timeout,
-                )
-                path_length_m_estimate = max(path_length_m_estimate, dist_m)
-                detail = (
-                    f"dist_est={dist_m:.3f}m (mín={args.motion_min_dist:.3f}m em {args.motion_timeout:.1f}s)"
-                )
-                _print(moved, "movimento detectado", detail)
-                if not moved:
-                    fails += 1
-                    run_error_code = "NO_MOTION_DETECTED"
             nav_done = node.wait_nav_state(rid, "idle", timeout_sec=args.wait_goal)
             _print(nav_done, "navegação terminou (idle)")
             fails += int(not nav_done)
+
+            if (
+                args.require_motion
+                and odom_start_xy is not None
+                and nav_started
+                and nav_done
+            ):
+                odom_end_xy = node.snapshot_odom_xy(0.45)
+                if odom_end_xy is None:
+                    _print(False, "odom final para require-motion")
+                    fails += 1
+                    run_error_code = "NO_ODOM_MSG"
+                else:
+                    disp = math.hypot(
+                        odom_end_xy[0] - odom_start_xy[0],
+                        odom_end_xy[1] - odom_start_xy[1],
+                    )
+                    path_length_m_estimate = max(path_length_m_estimate, disp)
+                    moved = disp >= args.motion_min_dist
+                    detail = (
+                        f"Δpose={disp:.3f}m (mín={args.motion_min_dist:.3f}m, início→fim após idle)"
+                    )
+                    _print(moved, "movimento replay (odom)", detail)
+                    if not moved:
+                        fails += 1
+                        run_error_code = "NO_MOTION_DETECTED"
 
         if not args.skip_collection:
             req_d = DisableCollection.Request()
