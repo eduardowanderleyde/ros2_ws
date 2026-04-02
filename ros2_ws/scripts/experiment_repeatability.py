@@ -25,6 +25,7 @@ Requisitos: sim + Nav2 + fleet (orchestrator + collector), TF map ok, papel MUUT
 Pontos: triples x,y,yaw_rad separados por ';' (yaw pode ser 0).
 
 Opcional: --export run_summary.json (metadados; inclui rosbag_path quando o disable_collection devolve o caminho do bag).
+Opcional: --initial-pose x,y,yaw_rad publica /initialpose (AMCL), equivalente ao 2D Pose Estimate no RViz.
 """
 from __future__ import annotations
 
@@ -43,6 +44,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 
 from fleet_msgs.msg import FleetStatus
@@ -64,6 +66,43 @@ def _norm_status_id(robot_id: str) -> str:
 def _expected_route_yaml_path(robot_id: str, route: str) -> str:
     key = "default" if not robot_id.strip() else robot_id.strip()
     return f"routes/{key}/{route}.yaml"
+
+
+def _parse_initial_pose(s: str) -> Tuple[float, float, float]:
+    bits = [float(x.strip()) for x in s.split(",")]
+    if len(bits) != 3:
+        raise ValueError("--initial-pose esperado: x,y,yaw_rad")
+    return bits[0], bits[1], bits[2]
+
+
+def _publish_initial_pose(node: Node, x: float, y: float, yaw: float) -> None:
+    """Publica uma vez (com reforço) em /initialpose para o AMCL; stamp = relógio do nó (sim ou parede)."""
+    pub = node.create_publisher(PoseWithCovarianceStamped, "initialpose", 10)
+    msg = PoseWithCovarianceStamped()
+    msg.header.frame_id = "map"
+    msg.header.stamp = node.get_clock().now().to_msg()
+    msg.pose.pose.position.x = x
+    msg.pose.pose.position.y = y
+    msg.pose.pose.position.z = 0.0
+    msg.pose.pose.orientation.x = 0.0
+    msg.pose.pose.orientation.y = 0.0
+    msg.pose.pose.orientation.z = math.sin(yaw * 0.5)
+    msg.pose.pose.orientation.w = math.cos(yaw * 0.5)
+    cov = [0.0] * 36
+    cov[0] = 0.25
+    cov[7] = 0.25
+    cov[35] = 0.06853891909122467
+    msg.pose.covariance = cov
+    t_wait = time.time() + 2.0
+    while time.time() < t_wait:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        if pub.get_subscription_count() >= 1:
+            break
+    for _ in range(5):
+        msg.header.stamp = node.get_clock().now().to_msg()
+        pub.publish(msg)
+        rclpy.spin_once(node, timeout_sec=0.05)
+        time.sleep(0.08)
 
 
 def _parse_points(s: str) -> List[Tuple[float, float, float]]:
@@ -240,7 +279,14 @@ def _rosbag_path_from_disable_message(msg: Optional[str]) -> Optional[str]:
     return tail if tail else None
 
 
-def _write_export(path: str, payload: Dict[str, Any]) -> None:
+def _write_export(
+    path: str,
+    payload: Dict[str, Any],
+    *,
+    args: Optional[argparse.Namespace] = None,
+) -> None:
+    if args is not None and getattr(args, "initial_pose", None):
+        payload = {**payload, "initial_pose": args.initial_pose}
     payload = {
         **payload,
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -273,6 +319,19 @@ def cmd_record(args: argparse.Namespace) -> int:
         print(f"robot={rid!r} route={args.route} pontos={len(points)}")
         print(f"topics={args.topics} skip_collection={args.skip_collection} export={args.export!r}")
 
+        if args.initial_pose is not None:
+            try:
+                ix, iy, iyaw = _parse_initial_pose(args.initial_pose)
+            except ValueError as e:
+                print(f"Erro: {e}", file=sys.stderr)
+                return 2
+            print(
+                f"[TRACE] Publicando /initialpose (AMCL) frame=map x={ix:.3f} y={iy:.3f} yaw={iyaw:.3f} rad ..."
+            )
+            _publish_initial_pose(node, ix, iy, iyaw)
+            print("[TRACE] Aguardando AMCL assentar (sleep 2.0s) ...")
+            time.sleep(2.0)
+
         if not args.skip_collection:
             req = EnableCollection.Request()
             req.robot_id = rid
@@ -301,6 +360,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                             "disable_collection_message": disable_msg,
                             "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                         },
+                        args=args,
                     )
                 return code
             time.sleep(1.0)
@@ -331,6 +391,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                         "disable_collection_message": disable_msg,
                         "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                     },
+                    args=args,
                 )
             return code
 
@@ -415,6 +476,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                     "disable_collection_message": disable_msg,
                     "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                 },
+                args=args,
             )
         return code
     finally:
@@ -438,6 +500,19 @@ def cmd_replay(args: argparse.Namespace) -> int:
         print("\n=== Fase B: reproduzir percurso (coleta + play_route) ===")
         print(f"robot={rid!r} route={args.route}")
         print(f"topics={args.topics} skip_collection={args.skip_collection} export={args.export!r}")
+
+        if args.initial_pose is not None:
+            try:
+                ix, iy, iyaw = _parse_initial_pose(args.initial_pose)
+            except ValueError as e:
+                print(f"Erro: {e}", file=sys.stderr)
+                return 2
+            print(
+                f"[TRACE] Publicando /initialpose (AMCL) frame=map x={ix:.3f} y={iy:.3f} yaw={iyaw:.3f} rad ..."
+            )
+            _publish_initial_pose(node, ix, iy, iyaw)
+            print("[TRACE] Aguardando AMCL assentar (sleep 2.0s) ...")
+            time.sleep(2.0)
 
         if not args.skip_collection:
             req = EnableCollection.Request()
@@ -466,6 +541,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                             "disable_collection_message": disable_msg,
                             "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                         },
+                        args=args,
                     )
                 return code
             time.sleep(1.0)
@@ -568,6 +644,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     "disable_collection_message": disable_msg,
                     "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
                 },
+                args=args,
             )
         return code
     finally:
@@ -624,6 +701,12 @@ def main() -> int:
         metavar="FILE.json",
         help="Salva metadados do run (rota, pontos, sucesso, rosbag_path quando disponível)",
     )
+    pr.add_argument(
+        "--initial-pose",
+        metavar="x,y,yaw",
+        default=None,
+        help="Publica /initialpose (AMCL) em map antes da coleta; yaw em radianos. Equiv. 2D Pose no RViz.",
+    )
     pr.set_defaults(func=cmd_record)
 
     pb = sub.add_parser("replay", help="Coleta + play_route da rota salva")
@@ -658,6 +741,12 @@ def main() -> int:
     pb.add_argument("--motion-timeout", type=float, default=10.0, help="Janela para detectar movimento (s)")
     pb.add_argument("--skip-collection", action="store_true")
     pb.add_argument("--export", metavar="FILE.json", help="Salva metadados do run")
+    pb.add_argument(
+        "--initial-pose",
+        metavar="x,y,yaw",
+        default=None,
+        help="Publica /initialpose (AMCL) em map antes da coleta; yaw em radianos.",
+    )
     pb.set_defaults(func=cmd_replay)
 
     args = p.parse_args()
