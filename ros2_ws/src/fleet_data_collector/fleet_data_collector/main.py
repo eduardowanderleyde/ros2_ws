@@ -1,331 +1,243 @@
 #!/usr/bin/env python3
-"""Sensor data collector: enable/disable per robot_id, write to rosbag2. UI-ready API."""
+"""Coleta rosbag2 por robot_id (enable/disable)."""
 from __future__ import annotations
 
 import os
-import threading
-import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Type
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Type
 
 import rclpy
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.serialization import serialize_message
-
-from sensor_msgs.msg import LaserScan, Imu
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from rclpy.subscription import Subscription
 
 import rosbag2_py
+from rosbag2_py import ConverterOptions, SequentialWriter, StorageOptions, TopicMetadata
 
-from fleet_msgs.srv import (
-    EnableCollection,
-    DisableCollection,
-    CollectionStatus,
-)
+from fleet_msgs.srv import CollectionStatus, DisableCollection, EnableCollection
 
-
-# Topic short name (relative to robot namespace) -> (Python msg type, rosbag2 type string)
-def _subscription_qos(short_name: str):
-    """QoS por tópico.
-
-    Nav2 AMCL (Jazzy): ``create_publisher(..., QoS(KeepLast(1)).transient_local().reliable())``.
-    Subscritor **volatile** pode não receber nada no Fast DDS; usar **transient_local**
-    igual ao publisher. ``depth`` > 1 para não perder rajadas entre callbacks.
-    """
-    if short_name == "amcl_pose":
-        return QoSProfile(
-            depth=50,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-        )
-    return 10
-
-
-KNOWN_TOPICS: Dict[str, Tuple[Type[Any], str]] = {
-    "scan": (LaserScan, "sensor_msgs/msg/LaserScan"),
-    "odom": (Odometry, "nav_msgs/msg/Odometry"),
-    "imu": (Imu, "sensor_msgs/msg/Imu"),
-    "amcl_pose": (
-        PoseWithCovarianceStamped,
-        "geometry_msgs/msg/PoseWithCovarianceStamped",
-    ),
-}
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Imu, LaserScan
 
 
 @dataclass
-class RobotCollectionState:
-    enabled: bool = False
-    writer: Optional[Any] = None  # rosbag2_py.SequentialWriter
-    write_lock: threading.Lock = field(default_factory=threading.Lock)
-    subscriptions: List[Any] = field(default_factory=list)
-    current_bag_uri: str = ""
-    topics: List[str] = field(default_factory=list)
-    output_mode: str = "rosbag2"
-
-
-def _bag_bytes(bag_uri: str) -> int:
-    if not bag_uri or not os.path.isdir(bag_uri):
-        return 0
-    total = 0
-    for _root, _dirs, files in os.walk(bag_uri):
-        for f in files:
-            total += os.path.getsize(os.path.join(_root, f))
-    return total
+class RobotSession:
+    is_collecting: bool = False
+    bag_uri: str = ""
+    writer: Optional[SequentialWriter] = None
+    bytes_written: int = 0
+    subscriptions: List[Subscription] = field(default_factory=list)
 
 
 class SensorCollector(Node):
+    _TYPE_MAP = {
+        "scan": ("sensor_msgs/msg/LaserScan", LaserScan),
+        "odom": ("nav_msgs/msg/Odometry", Odometry),
+        "imu": ("sensor_msgs/msg/Imu", Imu),
+    }
+
     def __init__(self) -> None:
         super().__init__("sensor_collector")
-        self._collection_cbg = ReentrantCallbackGroup()
-
         self.declare_parameter("robots", ["tb1", "tb2", "tb3"])
         self.declare_parameter("collections_dir", "collections")
 
-        self.robots: List[str] = self.get_parameter("robots").value
-        self.collections_dir: str = self.get_parameter("collections_dir").value
+        self._robots: List[str] = list(self.get_parameter("robots").value)
+        self._collections_dir: str = str(self.get_parameter("collections_dir").value)
+        self._sessions: Dict[str, RobotSession] = {rid: RobotSession() for rid in self._robots}
 
-        self._state: Dict[str, RobotCollectionState] = {
-            rid: RobotCollectionState() for rid in self.robots
-        }
+        self.create_service(EnableCollection, "enable_collection", self._cb_enable)
+        self.create_service(DisableCollection, "disable_collection", self._cb_disable)
+        self.create_service(CollectionStatus, "collection_status", self._cb_status)
 
-        self._enable_srv = self.create_service(
-            EnableCollection, "enable_collection", self._handle_enable
+        self.get_logger().info(f"sensor_collector ready robots={self._robots} dir={self._collections_dir}")
+
+    def _topic_name(self, robot_id: str, short: str) -> str:
+        if robot_id == "":
+            return f"/{short}"
+        return f"/{robot_id}/{short}"
+
+    def _subdir(self, robot_id: str) -> str:
+        return "default" if robot_id == "" else robot_id
+
+    def _known(self, robot_id: str) -> bool:
+        return robot_id in self._sessions
+
+    def _qos_sensor(self) -> QoSProfile:
+        return QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
         )
-        self._disable_srv = self.create_service(
-            DisableCollection, "disable_collection", self._handle_disable
+
+    def _make_writer(self, bag_dir: str) -> SequentialWriter:
+        storage = StorageOptions(uri=bag_dir, storage_id="mcap")
+        converter = ConverterOptions(
+            input_serialization_format="cdr",
+            output_serialization_format="cdr",
         )
-        self._status_srv = self.create_service(
-            CollectionStatus, "collection_status", self._handle_status
-        )
+        w = SequentialWriter()
+        w.open(storage, converter)
+        return w
 
-        self.get_logger().info(
-            f"sensor_collector ready. Robots: {self.robots}. "
-            "API: enable_collection, disable_collection, collection_status."
-        )
+    def _cb_enable(self, req: EnableCollection.Request, resp: EnableCollection.Response) -> EnableCollection.Response:
+        rid = req.robot_id
+        if not self._known(rid):
+            resp.success = False
+            resp.message = "UNKNOWN_ROBOT"
+            resp.error_code = "UNKNOWN_ROBOT"
+            return resp
+        sess = self._sessions[rid]
+        if sess.is_collecting:
+            resp.success = False
+            resp.message = "Already collecting"
+            resp.error_code = "ALREADY_COLLECTING"
+            return resp
+        if req.output_mode != "rosbag2":
+            resp.success = False
+            resp.message = f"Unsupported output_mode {req.output_mode!r}"
+            resp.error_code = "UNSUPPORTED_OUTPUT_MODE"
+            return resp
 
-    def _full_topic(self, robot_id: str, short_name: str) -> str:
-        if short_name.startswith("/"):
-            return short_name
-        # Sim sem namespace: robot_id vazio -> /scan, /odom, etc.
-        if not robot_id:
-            return f"/{short_name}"
-        return f"/{robot_id}/{short_name}"
+        resolved: List[tuple[str, str, Type]] = []
+        for short in req.topics:
+            s = short.strip()
+            if s.startswith("/"):
+                s = s.lstrip("/")
+            if s not in self._TYPE_MAP:
+                resp.success = False
+                resp.message = f"Unknown topic short name: {short!r}"
+                resp.error_code = "NO_VALID_TOPICS"
+                return resp
+            tname = self._topic_name(rid, s)
+            type_str, _cls = self._TYPE_MAP[s]
+            resolved.append((tname, type_str, _cls))
 
-    def _handle_enable(
-        self, request: EnableCollection.Request, response: EnableCollection.Response
-    ) -> EnableCollection.Response:
-        robot_id = request.robot_id.strip()
-        if robot_id not in self._state:
-            response.success = False
-            response.message = f"Unknown robot_id: {robot_id}. Known: {self.robots}."
-            response.error_code = "UNKNOWN_ROBOT"
-            return response
+        if not resolved:
+            resp.success = False
+            resp.message = "No topics"
+            resp.error_code = "NO_VALID_TOPICS"
+            return resp
 
-        state = self._state[robot_id]
-        if state.enabled:
-            response.success = False
-            response.message = f"Collection already enabled for {robot_id}. Disable first."
-            response.error_code = "ALREADY_COLLECTING"
-            return response
-
-        topics = [t.strip() for t in request.topics if t.strip()]
-        if not topics:
-            topics = list(KNOWN_TOPICS.keys())
-
-        output_mode = (request.output_mode or "rosbag2").strip().lower()
-        if output_mode != "rosbag2":
-            response.success = False
-            response.message = f"Only output_mode 'rosbag2' is supported for now. Got: {output_mode}"
-            response.error_code = "UNSUPPORTED_OUTPUT_MODE"
-            return response
-
-        key = robot_id if robot_id else "default"
-        base = os.path.join(self.collections_dir, key)
-        os.makedirs(base, exist_ok=True)
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        bag_uri = os.path.join(base, stamp)
-
-        if os.path.exists(bag_uri):
-            response.success = False
-            response.message = f"Bag path already exists: {bag_uri}"
-            response.error_code = "BAG_PATH_EXISTS"
-            return response
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S_%f")
+        bag_name = ts
+        bag_dir = os.path.join(self._collections_dir, self._subdir(rid), bag_name)
+        if os.path.exists(bag_dir):
+            resp.success = False
+            resp.message = f"Path exists: {bag_dir}"
+            resp.error_code = "BAG_PATH_EXISTS"
+            return resp
+        os.makedirs(bag_dir, exist_ok=True)
 
         try:
-            writer = rosbag2_py.SequentialWriter()
-            storage_options = rosbag2_py.StorageOptions(uri=bag_uri, storage_id="mcap")
-            converter_options = rosbag2_py.ConverterOptions("", "")
-            self.get_logger().info(
-                f"[{robot_id}] enable_collection: opening rosbag writer storage_id=mcap uri={bag_uri}"
-            )
-            writer.open(storage_options, converter_options)
-
-            topic_id = 0
-            topic_meta: List[Tuple[str, Type[Any], str]] = []
-            for short in topics:
-                if short not in KNOWN_TOPICS:
-                    self.get_logger().warn(f"Unknown topic '{short}', skipping. Known: {list(KNOWN_TOPICS.keys())}")
-                    continue
-                msg_type, type_str = KNOWN_TOPICS[short]
-                full_name = self._full_topic(robot_id, short)
-                info = rosbag2_py.TopicMetadata(
-                    id=topic_id,
-                    name=full_name,
-                    type=type_str,
-                    serialization_format="cdr",
-                )
-                writer.create_topic(info)
-                topic_meta.append((full_name, msg_type, type_str))
-                topic_id += 1
-
-            if not topic_meta:
-                response.success = False
-                response.message = "No valid topics to record."
-                response.error_code = "NO_VALID_TOPICS"
-                return response
-
-            subs = []
-            for (full_name, msg_type, _), short in zip(
-                topic_meta,
-                [t for t in topics if t in KNOWN_TOPICS],
-            ):
-                cb = self._make_write_cb(robot_id, full_name, writer)
-                qos = _subscription_qos(short)
-                sub = self.create_subscription(
-                    msg_type,
-                    full_name,
-                    cb,
-                    qos,
-                    callback_group=self._collection_cbg,
-                )
-                subs.append(sub)
-
-            state.enabled = True
-            state.writer = writer
-            state.subscriptions = subs
-            state.current_bag_uri = bag_uri
-            state.topics = [t[0] for t in topic_meta]
-            state.output_mode = output_mode
-
-            self.get_logger().info(
-                f"[{robot_id}] Collection enabled. Bag: {bag_uri}, topics: {state.topics}"
-            )
-            response.success = True
-            response.message = f"Collection enabled for {robot_id}. Bag: {bag_uri}"
-            response.error_code = ""
+            writer = self._make_writer(bag_dir)
         except Exception as e:
-            self.get_logger().error(f"Enable collection failed: {e}")
-            self.get_logger().error(traceback.format_exc())
-            # Remove partial bag directory to keep subsequent runs clean.
-            try:
-                if os.path.isdir(bag_uri):
-                    import shutil
+            resp.success = False
+            resp.message = str(e)
+            resp.error_code = "ENABLE_FAILED"
+            return resp
 
-                    shutil.rmtree(bag_uri)
+        sess.writer = writer
+        sess.bag_uri = bag_dir
+        sess.bytes_written = 0
+        sess.is_collecting = True
+
+        topic_id = 0
+        for tname, type_str, msg_cls in resolved:
+            meta = TopicMetadata(topic_id, tname, type_str, "cdr", [])
+            topic_id += 1
+            writer.create_topic(meta)
+
+            def make_cb(full_name: str, cls: Type):
+                def _write(msg) -> None:
+                    if sess.writer is None:
+                        return
+                    try:
+                        data = serialize_message(msg)
+                        stamp_ns = self.get_clock().now().nanoseconds
+                        if hasattr(msg, "header") and msg.header.stamp.sec != 0:
+                            stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
+                        sess.writer.write(full_name, data, stamp_ns)
+                        sess.bytes_written += len(data)
+                    except Exception as ex:
+                        self.get_logger().warn(f"write {full_name}: {ex}")
+
+                return _write
+
+            sub = self.create_subscription(
+                msg_cls,
+                tname,
+                make_cb(tname, msg_cls),
+                self._qos_sensor(),
+            )
+            sess.subscriptions.append(sub)
+
+        resp.success = True
+        resp.message = f"Collection enabled. Bag: {bag_dir}"
+        resp.error_code = ""
+        return resp
+
+    def _cb_disable(self, req: DisableCollection.Request, resp: DisableCollection.Response) -> DisableCollection.Response:
+        rid = req.robot_id
+        if not self._known(rid):
+            resp.success = False
+            resp.message = "UNKNOWN_ROBOT"
+            resp.error_code = "UNKNOWN_ROBOT"
+            return resp
+        sess = self._sessions[rid]
+        if not sess.is_collecting:
+            resp.success = True
+            resp.message = "Collection was off"
+            resp.error_code = ""
+            return resp
+
+        path = sess.bag_uri
+        for sub in sess.subscriptions:
+            self.destroy_subscription(sub)
+        sess.subscriptions.clear()
+        if sess.writer is not None:
+            try:
+                sess.writer.close()
             except Exception:
                 pass
-            response.success = False
-            response.message = str(e)
-            response.error_code = "ENABLE_FAILED"
-        return response
+            sess.writer = None
+        sess.is_collecting = False
+        sess.bytes_written = 0
 
-    def _make_write_cb(self, robot_id: str, topic_name: str, writer):
-        def cb(msg):
-            state = self._state.get(robot_id)
-            if not state or not state.enabled or state.writer is None:
-                return
-            try:
-                with state.write_lock:
-                    state.writer.write(
-                        topic_name,
-                        serialize_message(msg),
-                        self.get_clock().now().nanoseconds,
-                    )
-            except Exception as ex:
-                self.get_logger().error(f"Write failed [{topic_name}]: {ex}")
+        resp.success = True
+        resp.message = f"Collection disabled for {rid or 'default'}. Bag: {path}"
+        resp.error_code = ""
+        return resp
 
-        return cb
-
-    def _handle_disable(
-        self, request: DisableCollection.Request, response: DisableCollection.Response
-    ) -> DisableCollection.Response:
-        robot_id = request.robot_id.strip()
-        if robot_id not in self._state:
-            response.success = False
-            response.message = f"Unknown robot_id: {robot_id}."
-            response.error_code = "UNKNOWN_ROBOT"
-            return response
-
-        state = self._state[robot_id]
-        if not state.enabled:
-            response.success = True
-            response.message = f"Collection was not enabled for {robot_id}."
-            response.error_code = ""
-            return response
-
-        try:
-            for sub in state.subscriptions:
-                self.destroy_subscription(sub)
-            state.subscriptions.clear()
-            if state.writer is not None:
-                state.writer.close()
-                state.writer = None
-            bag_uri = state.current_bag_uri
-            state.enabled = False
-            state.current_bag_uri = ""
-            state.topics = []
-
-            self.get_logger().info(f"[{robot_id}] Collection disabled. Bag saved: {bag_uri}")
-            response.success = True
-            response.message = f"Collection disabled for {robot_id}. Bag: {bag_uri}"
-            response.error_code = ""
-        except Exception as e:
-            self.get_logger().error(f"Disable collection failed: {e}")
-            response.success = False
-            response.message = str(e)
-            response.error_code = "DISABLE_FAILED"
-        return response
-
-    def _handle_status(
-        self, request: CollectionStatus.Request, response: CollectionStatus.Response
-    ) -> CollectionStatus.Response:
-        robot_id = request.robot_id.strip()
-        if robot_id not in self._state:
-            response.is_collecting = False
-            response.current_file = ""
-            response.bytes_written = 0
-            response.message = f"Unknown robot_id: {robot_id}."
-            return response
-
-        state = self._state[robot_id]
-        response.is_collecting = state.enabled
-        response.current_file = state.current_bag_uri
-        response.bytes_written = _bag_bytes(state.current_bag_uri) if state.current_bag_uri else 0
-        response.message = "OK"
-        return response
+    def _cb_status(self, req: CollectionStatus.Request, resp: CollectionStatus.Response) -> CollectionStatus.Response:
+        rid = req.robot_id
+        if not self._known(rid):
+            resp.is_collecting = False
+            resp.current_file = ""
+            resp.bytes_written = 0
+            resp.message = "UNKNOWN_ROBOT"
+            return resp
+        sess = self._sessions[rid]
+        resp.is_collecting = sess.is_collecting
+        resp.current_file = sess.bag_uri if sess.is_collecting else ""
+        resp.bytes_written = sess.bytes_written
+        resp.message = "ok"
+        return resp
 
 
-def main(args=None) -> None:
-    from rclpy.executors import MultiThreadedExecutor
-
+def main(args: Optional[List[str]] = None) -> None:
     rclpy.init(args=args)
     node = SensorCollector()
-    executor = MultiThreadedExecutor(num_threads=4)
-    executor.add_node(node)
     try:
-        executor.spin()
+        rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Shutting down (KeyboardInterrupt).")
+        pass
     finally:
-        executor.shutdown()
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
