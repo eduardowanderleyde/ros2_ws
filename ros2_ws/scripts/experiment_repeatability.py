@@ -399,8 +399,10 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
             # Importa classes uma vez só
             from nav_msgs.msg import Odometry as _Odom
             from sensor_msgs.msg import LaserScan as _Scan, Imu as _Imu
+            from tf2_msgs.msg import TFMessage as _TFMsg
 
             odom_count = 0
+            tf_positions: list = []   # (x, y, t_ns) via map→odom ou map→base_footprint
             while reader.has_next():
                 try:
                     topic_raw, data, t_ns = reader.read_next()
@@ -459,24 +461,55 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                     except Exception:
                         pass
 
+                elif topic == "/tf" and "TFMessage" in ttype:
+                    try:
+                        msg = deserialize_message(data, _TFMsg)
+                        for tr in msg.transforms:
+                            fid = tr.header.frame_id
+                            cid = tr.child_frame_id
+                            # Captura map→odom (posição SLAM) ou map→base_footprint
+                            if fid == "map" and cid in ("odom", "base_footprint", "base_link"):
+                                tx = tr.transform.translation
+                                tf_positions.append((tx.x, tx.y, t_ns))
+                    except Exception:
+                        pass
+
             odom_path_m = max(odom_path_pos, odom_path_vel)
             odom_is_zero = odom_count > 0 and odom_path_m < 0.001
             print(f"[TRACE] odom msgs lidas: {odom_count}  path_pos: {odom_path_pos:.4f} m  path_vel: {odom_path_vel:.4f} m  → usando: {odom_path_m:.4f} m")
             if odom_is_zero:
-                print("[TRACE] AVISO: odom sempre zero — plugin Gazebo não publica odometria neste setup. Percurso real indisponível via /odom.")
+                print("[TRACE] AVISO: odom sempre zero — usando TF (map→odom) para percurso")
+
+            # Percurso via TF (map→odom do SLAM Toolbox — mais fiável que /odom no Gazebo)
+            tf_path_m = 0.0
+            if tf_positions:
+                # Filtra saltos > 1 m (artefactos de TF) e acumula distância
+                prev_tf: Optional[tuple] = None
+                for (x, y, _) in tf_positions:
+                    if prev_tf is not None:
+                        d = _math.hypot(x - prev_tf[0], y - prev_tf[1])
+                        if d < 1.0:   # ignora teletransportes
+                            tf_path_m += d
+                    prev_tf = (x, y)
+                print(f"[TRACE] TF path: {len(tf_positions)} pontos  percurso: {tf_path_m:.4f} m")
+
             reader.close()
             break  # leu com sucesso
 
         metrics: dict = {}
         if duration_s is not None:
             metrics["duration_s"] = round(duration_s, 2)
-        # Só inclui métricas de odom se há dados reais (Gazebo neste setup publica sempre zero)
-        if odom_path_m > 0.001:
+        # Percurso real via TF (preferido), fallback para odom se disponível
+        if tf_path_m > 0.01:
+            metrics["tf_path_length_m"] = round(tf_path_m, 3)
+            ref_dur = duration_s or 1
+            metrics["tf_avg_speed_ms"] = round(tf_path_m / ref_dur, 3)
+        elif odom_path_m > 0.001:
             metrics["odom_path_length_m"] = round(odom_path_m, 3)
             if duration_s and duration_s > 0:
                 metrics["odom_avg_speed_ms"] = round(odom_path_m / duration_s, 3)
         elif odom_count > 0:
-            metrics["odom_unavailable"] = True  # sinaliza para a UI não mostrar 0
+            metrics["odom_unavailable"] = True
         if scan_valid_counts:
             metrics["scan_avg_valid_points"] = round(sum(scan_valid_counts) / len(scan_valid_counts), 1)
             metrics["scan_min_valid_points"] = min(scan_valid_counts)
@@ -490,16 +523,19 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
             print("\n[TRACE] Métricas do bag:")
             labels = {
                 "duration_s": "Duração",
+                "tf_path_length_m": "Percurso real (TF/SLAM)",
+                "tf_avg_speed_ms": "Velocidade média (TF)",
                 "odom_path_length_m": "Percurso /odom",
-                "odom_avg_speed_ms": "Velocidade média",
+                "odom_avg_speed_ms": "Velocidade média (odom)",
                 "scan_avg_valid_points": "Scan pontos válidos (média)",
                 "scan_min_valid_points": "Scan pontos válidos (mín)",
                 "imu_accel_mean_ms2": "IMU aceleração média (m/s²)",
                 "imu_accel_variance_ms2": "IMU variância aceleração",
             }
             units = {
-                "duration_s": "s", "odom_path_length_m": "m",
-                "odom_avg_speed_ms": "m/s", "imu_accel_mean_ms2": "m/s²",
+                "duration_s": "s", "tf_path_length_m": "m", "tf_avg_speed_ms": "m/s",
+                "odom_path_length_m": "m", "odom_avg_speed_ms": "m/s",
+                "imu_accel_mean_ms2": "m/s²",
             }
             for k, v in metrics.items():
                 u = units.get(k, "")

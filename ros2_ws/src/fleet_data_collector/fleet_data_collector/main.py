@@ -22,6 +22,7 @@ from fleet_msgs.srv import CollectionStatus, DisableCollection, EnableCollection
 
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, LaserScan
+from tf2_msgs.msg import TFMessage
 
 
 @dataclass
@@ -34,10 +35,16 @@ class RobotSession:
 
 
 class SensorCollector(Node):
+    # Tópicos com prefixo de robot_id
     _TYPE_MAP = {
         "scan": ("sensor_msgs/msg/LaserScan", LaserScan),
         "odom": ("nav_msgs/msg/Odometry", Odometry),
-        "imu": ("sensor_msgs/msg/Imu", Imu),
+        "imu":  ("sensor_msgs/msg/Imu", Imu),
+    }
+    # Tópicos globais (sem prefixo de robot_id, nome fixo)
+    _GLOBAL_TOPICS = {
+        "tf":        ("/tf",        "tf2_msgs/msg/TFMessage", TFMessage),
+        "tf_static": ("/tf_static", "tf2_msgs/msg/TFMessage", TFMessage),
     }
 
     def __init__(self) -> None:
@@ -74,6 +81,14 @@ class SensorCollector(Node):
             durability=DurabilityPolicy.VOLATILE,
         )
 
+    def _qos_tf(self) -> QoSProfile:
+        return QoSProfile(
+            depth=100,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
     def _make_writer(self, bag_dir: str) -> SequentialWriter:
         storage = StorageOptions(uri=bag_dir, storage_id="mcap")
         converter = ConverterOptions(
@@ -103,19 +118,22 @@ class SensorCollector(Node):
             resp.error_code = "UNSUPPORTED_OUTPUT_MODE"
             return resp
 
-        resolved: List[tuple[str, str, Type]] = []
+        # resolved: (topic_name, type_str, msg_cls, is_global)
+        resolved: List[tuple[str, str, Type, bool]] = []
         for short in req.topics:
-            s = short.strip()
-            if s.startswith("/"):
-                s = s.lstrip("/")
-            if s not in self._TYPE_MAP:
+            s = short.strip().lstrip("/")
+            if s in self._GLOBAL_TOPICS:
+                tname, type_str, cls = self._GLOBAL_TOPICS[s]
+                resolved.append((tname, type_str, cls, True))
+            elif s in self._TYPE_MAP:
+                tname = self._topic_name(rid, s)
+                type_str, cls = self._TYPE_MAP[s]
+                resolved.append((tname, type_str, cls, False))
+            else:
                 resp.success = False
                 resp.message = f"Unknown topic short name: {short!r}"
                 resp.error_code = "NO_VALID_TOPICS"
                 return resp
-            tname = self._topic_name(rid, s)
-            type_str, _cls = self._TYPE_MAP[s]
-            resolved.append((tname, type_str, _cls))
 
         if not resolved:
             resp.success = False
@@ -146,20 +164,26 @@ class SensorCollector(Node):
         sess.is_collecting = True
 
         topic_id = 0
-        for tname, type_str, msg_cls in resolved:
+        for tname, type_str, msg_cls, is_global in resolved:
             meta = TopicMetadata(topic_id, tname, type_str, "cdr", [])
             topic_id += 1
             writer.create_topic(meta)
 
-            def make_cb(full_name: str, cls: Type):
+            def make_cb(full_name: str, cls: Type, global_topic: bool):
                 def _write(msg) -> None:
                     if sess.writer is None:
                         return
                     try:
                         data = serialize_message(msg)
-                        stamp_ns = self.get_clock().now().nanoseconds
-                        if hasattr(msg, "header") and msg.header.stamp.sec != 0:
+                        # TFMessage: usa stamp do primeiro transform se disponível
+                        if global_topic and hasattr(msg, "transforms") and msg.transforms:
+                            stamp_ns = Time.from_msg(msg.transforms[0].header.stamp).nanoseconds
+                            if stamp_ns == 0:
+                                stamp_ns = self.get_clock().now().nanoseconds
+                        elif hasattr(msg, "header") and msg.header.stamp.sec != 0:
                             stamp_ns = Time.from_msg(msg.header.stamp).nanoseconds
+                        else:
+                            stamp_ns = self.get_clock().now().nanoseconds
                         sess.writer.write(full_name, data, stamp_ns)
                         sess.bytes_written += len(data)
                     except Exception as ex:
@@ -167,11 +191,12 @@ class SensorCollector(Node):
 
                 return _write
 
+            qos = self._qos_tf() if is_global else self._qos_sensor()
             sub = self.create_subscription(
                 msg_cls,
                 tname,
-                make_cb(tname, msg_cls),
-                self._qos_sensor(),
+                make_cb(tname, msg_cls, is_global),
+                qos,
             )
             sess.subscriptions.append(sub)
 
