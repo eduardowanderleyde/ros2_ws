@@ -224,6 +224,8 @@ _jobs: dict = {}   # job_id → {running, lines, result, error}
 def _build_cmd(cfg: dict) -> list[str]:
     cmd = cfg.get("command", "record")
     robot = cfg.get("robot", "")
+    # "default" é o robot único em single_robot_sim → usa --single-robot (robot_id="")
+    single = not robot or robot == "default"
     route = cfg.get("route", "percurso1")
     collect = cfg.get("collect", True)
     ip = cfg.get("initial_pose")
@@ -231,7 +233,7 @@ def _build_cmd(cfg: dict) -> list[str]:
         "python3", str(Path(WORKSPACE) / "scripts" / "experiment_repeatability.py"),
         cmd, "--route", route,
     ]
-    if not robot:
+    if single:
         args += ["--single-robot"]
     else:
         args += ["--robot", robot]
@@ -273,8 +275,12 @@ async def run_config(cfg: dict):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=WORKSPACE, env=env,
             )
+            _NOISE = ("TF_OLD_DATA", "RTPS_TRANSPORT_SHM", "Possible reasons", "ros.org/tf")
             for line in proc.stdout:
-                _jobs[job_id]["lines"].append(line.rstrip())
+                l = line.rstrip()
+                if any(n in l for n in _NOISE):
+                    continue
+                _jobs[job_id]["lines"].append(l)
             proc.wait()
             _jobs[job_id]["exit_code"] = proc.returncode
             # load export json

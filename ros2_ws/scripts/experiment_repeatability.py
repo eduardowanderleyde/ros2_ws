@@ -454,6 +454,9 @@ def cmd_record(args: argparse.Namespace) -> int:
                 if not good:
                     break
                 nav_started = node.wait_nav_state(rid, "navigating", timeout_sec=12.0)
+                if not nav_started:
+                    # Navegação muito rápida: se já voltou a "recording" foi OK
+                    nav_started = node.get_nav_state(rid) == "recording"
                 _print(nav_started, f"wp{i} estado navigating")
                 fails += int(not nav_started)
                 if args.require_motion and nav_started:
