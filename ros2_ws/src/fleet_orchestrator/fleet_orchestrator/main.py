@@ -273,7 +273,9 @@ class FleetOrchestrator(Node):
         st.is_navigating = True
         st.nav_state = "navigating"
         st.last_error = ""
-        st.current_route = route_label
+        # Preserve current_route when called from go_to_point during recording
+        if route_label:
+            st.current_route = route_label
 
         send_future = client.send_goal_async(goal, feedback_callback=self._make_feedback_cb(robot_id))
         send_future.add_done_callback(self._make_goal_response_cb(robot_id))
@@ -292,16 +294,18 @@ class FleetOrchestrator(Node):
                 gh = fut.result()
             except Exception as ex:
                 st.is_navigating = False
-                st.nav_state = "failed"
+                st.nav_state = "recording" if st.is_recording else "failed"
                 st.last_error = "NAV2_REJECTED"
-                st.current_route = ""
+                if not st.is_recording:
+                    st.current_route = ""
                 self.get_logger().error(f"Nav2 goal error {robot_id}: {ex}")
                 return
             if not gh.accepted:
                 st.is_navigating = False
-                st.nav_state = "failed"
+                st.nav_state = "recording" if st.is_recording else "failed"
                 st.last_error = "NAV2_REJECTED"
-                st.current_route = ""
+                if not st.is_recording:
+                    st.current_route = ""
                 self.get_logger().error(f"Nav2 rejected goal {robot_id}")
                 return
             st.goal_handle = gh
@@ -314,20 +318,23 @@ class FleetOrchestrator(Node):
             st = self._state[robot_id]
             st.is_navigating = False
             st.goal_handle = None
-            st.current_route = ""
+            # Don't clear current_route while recording — stop_record needs it
+            if not st.is_recording:
+                st.current_route = ""
             try:
                 res = fut.result()
                 status = res.status
             except Exception as ex:
-                st.nav_state = "failed"
+                st.nav_state = "recording" if st.is_recording else "failed"
                 st.last_error = "NAV2_FAILED"
                 self.get_logger().error(f"Nav2 result {robot_id}: {ex}")
                 return
             if status == GoalStatus.STATUS_SUCCEEDED:
-                st.nav_state = "idle"
+                # During recording, restore "recording" state so scripts can poll it
+                st.nav_state = "recording" if st.is_recording else "idle"
                 st.last_error = ""
             else:
-                st.nav_state = "failed"
+                st.nav_state = "recording" if st.is_recording else "failed"
                 st.last_error = "NAV2_ABORTED"
         return _cb
 

@@ -4,10 +4,14 @@ Rode com o workspace sourceado: source install/setup.bash && python main.py
 """
 from __future__ import annotations
 
+import base64
 import json
+import math
 import os
+import struct
 import subprocess
 import threading
+import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,6 +25,8 @@ WORKSPACE = os.environ.get("FLEET_WS") or str(Path(__file__).resolve().parent.pa
 
 # Status da frota (atualizado pelo subscriber ROS em thread)
 _fleet_status: dict = {"robots": []}
+_robot_pose: dict = {"x": 0.0, "y": 0.0, "yaw": 0.0, "valid": False}
+_map_meta: dict = {}  # resolution, origin_x, origin_y, width, height, png_b64
 _status_lock = threading.Lock()
 _ws_clients: list[WebSocket] = []
 
@@ -53,22 +59,51 @@ def _run_ros2_service(srv: str, srv_type: str, request_json: str, timeout: int =
         return False, str(e)
 
 
+def _encode_map_png(data: list, width: int, height: int) -> bytes:
+    """Codifica OccupancyGrid como PNG grayscale (Y flipado para canvas)."""
+    pixels = []
+    for v in data:
+        if v < 0:
+            pixels.append(180)   # desconhecido: cinza
+        elif v == 0:
+            pixels.append(240)   # livre: branco
+        else:
+            pixels.append(30)    # ocupado: quase preto
 
+    def make_row(row_idx: int) -> bytes:
+        row = bytearray([0])  # filter type None
+        row.extend(pixels[row_idx * width:(row_idx + 1) * width])
+        return bytes(row)
 
+    # Flipa Y: row 0 do PNG = maior y do mundo
+    raw = b''.join(make_row(height - 1 - y) for y in range(height))
+    compressed = zlib.compress(raw, 6)
+
+    def png_chunk(tag: bytes, payload: bytes) -> bytes:
+        body = tag + payload
+        return struct.pack('>I', len(payload)) + body + struct.pack('>I', zlib.crc32(body) & 0xFFFFFFFF)
+
+    png = b'\x89PNG\r\n\x1a\n'
+    png += png_chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 0, 0, 0, 0))
+    png += png_chunk(b'IDAT', compressed)
+    png += png_chunk(b'IEND', b'')
+    return png
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicia thread do subscriber ROS (se rclpy disponível)
     def run_ros():
         try:
             import rclpy
             from rclpy.node import Node
             from fleet_msgs.msg import FleetStatus
+            from geometry_msgs.msg import PoseWithCovarianceStamped
+            from nav_msgs.msg import OccupancyGrid
 
             rclpy.init()
             node = Node("fleet_ui_bridge")
-            def cb(msg):
+
+            def fleet_cb(msg):
                 with _status_lock:
                     _fleet_status["robots"] = [
                         {
@@ -84,7 +119,38 @@ async def lifespan(app: FastAPI):
                         for r in msg.robots
                     ]
 
-            node.create_subscription(FleetStatus, "fleet/status", cb, 10)
+            def amcl_cb(msg):
+                p = msg.pose.pose.position
+                q = msg.pose.pose.orientation
+                yaw = math.atan2(
+                    2.0 * (q.w * q.z + q.x * q.y),
+                    1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+                )
+                with _status_lock:
+                    _robot_pose.update({"x": p.x, "y": p.y, "yaw": yaw, "valid": True})
+
+            def map_cb(msg):
+                info = msg.info
+                if info.width == 0 or info.height == 0:
+                    return
+                try:
+                    png = _encode_map_png(list(msg.data), info.width, info.height)
+                    b64 = base64.b64encode(png).decode()
+                    with _status_lock:
+                        _map_meta.update({
+                            "resolution": info.resolution,
+                            "origin_x": info.origin.position.x,
+                            "origin_y": info.origin.position.y,
+                            "width": info.width,
+                            "height": info.height,
+                            "png_b64": b64,
+                        })
+                except Exception as e:
+                    node.get_logger().warning(f"map_cb error: {e}")
+
+            node.create_subscription(FleetStatus, "fleet/status", fleet_cb, 10)
+            node.create_subscription(PoseWithCovarianceStamped, "amcl_pose", amcl_cb, 10)
+            node.create_subscription(OccupancyGrid, "map", map_cb, 1)
             rclpy.spin(node)
             node.destroy_node()
             rclpy.shutdown()
@@ -94,7 +160,6 @@ async def lifespan(app: FastAPI):
     t = threading.Thread(target=run_ros, daemon=True)
     t.start()
     yield
-    # shutdown
 
 
 app = FastAPI(title="Fleet UI API", lifespan=lifespan)
@@ -104,7 +169,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.get("/api/status")
 async def get_status():
     with _status_lock:
-        return _fleet_status
+        return {**_fleet_status, "pose": _robot_pose}
 
 
 @app.websocket("/ws/status")
@@ -113,16 +178,25 @@ async def websocket_status(websocket: WebSocket):
     _ws_clients.append(websocket)
     try:
         with _status_lock:
-            await websocket.send_text(json.dumps(_fleet_status))
+            await websocket.send_text(json.dumps({**_fleet_status, "pose": _robot_pose}))
         while True:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.25)
             with _status_lock:
-                await websocket.send_text(json.dumps(_fleet_status))
+                payload = {**_fleet_status, "pose": _robot_pose}
+            await websocket.send_text(json.dumps(payload))
     except WebSocketDisconnect:
         pass
     finally:
         if websocket in _ws_clients:
             _ws_clients.remove(websocket)
+
+
+@app.get("/api/map")
+async def get_map():
+    with _status_lock:
+        if not _map_meta:
+            return JSONResponse(content={"available": False})
+        return {"available": True, **_map_meta}
 
 
 @app.post("/api/start_record")
@@ -181,7 +255,6 @@ async def list_robots():
     if not ok:
         return JSONResponse(content={"robot_ids": []}, status_code=200)
     try:
-        # Parse YAML-like output from ros2 service call
         import yaml
         data = yaml.safe_load(out) if out else {}
         robot_ids = data.get("robot_ids", []) or []
