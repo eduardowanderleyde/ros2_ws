@@ -228,6 +228,7 @@ def _build_cmd(cfg: dict) -> list[str]:
     single = not robot or robot == "default"
     route = cfg.get("route", "percurso1")
     collect = cfg.get("collect", True)
+    topics = cfg.get("topics", ["scan", "odom", "imu"])
     ip = cfg.get("initial_pose")
     args = [
         "python3", str(Path(WORKSPACE) / "scripts" / "experiment_repeatability.py"),
@@ -239,6 +240,8 @@ def _build_cmd(cfg: dict) -> list[str]:
         args += ["--robot", robot]
     if not collect:
         args += ["--skip-collection"]
+    else:
+        args += ["--topics"] + topics
     if ip:
         args += ["--initial-pose", f"{ip[0]},{ip[1]},{ip[2]}"]
     if cmd == "record":
@@ -266,14 +269,14 @@ async def run_config(cfg: dict):
     _jobs[job_id] = {"running": True, "lines": [], "result": None, "error": None, "exit_code": None}
 
     def _run():
-        env = {**_ros_env()}
+        env = {**_ros_env(), "PYTHONUNBUFFERED": "1"}
         ros_setup = f"source /opt/ros/jazzy/setup.bash 2>/dev/null; source {WORKSPACE}/install/setup.bash 2>/dev/null; "
         shell_cmd = ros_setup + " ".join(shlex.quote(c) for c in cmd)
         try:
             proc = subprocess.Popen(
                 ["bash", "-c", shell_cmd],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=WORKSPACE, env=env,
+                text=True, bufsize=1, cwd=WORKSPACE, env=env,
             )
             _NOISE = ("TF_OLD_DATA", "RTPS_TRANSPORT_SHM", "Possible reasons", "ros.org/tf")
             for line in proc.stdout:

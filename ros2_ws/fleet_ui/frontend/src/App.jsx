@@ -7,6 +7,7 @@ const EXAMPLE_RECORD = JSON.stringify({
   robot: "default",
   route: "percurso1",
   collect: true,
+  topics: ["scan", "odom", "imu"],
   initial_pose: [0, 0, 0],
   points: [
     [0.5, 0.0, 0.0],
@@ -21,6 +22,7 @@ const EXAMPLE_REPLAY = JSON.stringify({
   robot: "default",
   route: "percurso1",
   collect: true,
+  topics: ["scan", "odom", "imu"],
   initial_pose: [0, 0, 0],
   return_to_start: [0, 0, 0]
 }, null, 2)
@@ -31,7 +33,10 @@ export default function App() {
   const [job, setJob]             = useState(null)
   const [running, setRunning]     = useState(false)
   const [parseError, setParseError] = useState(null)
+  const [showResult, setShowResult] = useState(false)
   const [status, setStatus]       = useState({ robots: [], pose: { x: 0, y: 0, yaw: 0, valid: false } })
+  const [resetMsg, setResetMsg]   = useState(null)
+  const [resetting, setResetting] = useState(false)
   const outputRef = useRef(null)
   const pollRef   = useRef(null)
 
@@ -108,6 +113,21 @@ export default function App() {
     return '#e6e9ef'
   }
 
+  const resetToOrigin = async () => {
+    setResetting(true)
+    setResetMsg(null)
+    try {
+      const r = await fetch(`${API}/go_to_point?x=0&y=0&yaw=0`, { method: 'POST' })
+      const data = await r.json()
+      setResetMsg(data.success ? 'ok' : 'erro')
+    } catch {
+      setResetMsg('erro')
+    } finally {
+      setResetting(false)
+      setTimeout(() => setResetMsg(null), 3000)
+    }
+  }
+
   const deg = r => (r * 180 / Math.PI).toFixed(1)
 
   return (
@@ -130,6 +150,18 @@ export default function App() {
               {pose.valid ? `x=${pose.x.toFixed(2)} y=${pose.y.toFixed(2)} yaw=${deg(pose.yaw)}°` : 'aguardando…'}
             </span>
           </span>
+          <button
+            onClick={resetToOrigin}
+            disabled={resetting}
+            title="Envia robô para (0, 0, 0)"
+            style={{
+              ...btnStyle(resetting ? '#1a2a3a' : '#161a22', resetMsg === 'erro' ? '#f87171' : resetMsg === 'ok' ? '#6ee7b7' : '#6366f1'),
+              fontSize: '0.78rem',
+              padding: '0.3rem 0.75rem',
+            }}
+          >
+            {resetting ? '⏳ indo…' : resetMsg === 'ok' ? '✓ indo' : resetMsg === 'erro' ? '✗ falhou' : '⟳ Reiniciar'}
+          </button>
         </div>
       </div>
 
@@ -232,27 +264,25 @@ export default function App() {
             )}
           </div>
 
-          {/* Resultado final */}
+          {/* Resultado final — colapsável */}
           {job?.result && (
             <div>
-              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#8b92a8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.5rem' }}>
-                Resultado
-              </div>
-              <pre style={{
-                background: '#161a22',
-                border: '1px solid #2a3142',
-                borderRadius: '8px',
-                padding: '0.75rem 1rem',
-                fontSize: '0.78rem',
-                fontFamily: 'JetBrains Mono, Consolas, monospace',
-                color: '#e6e9ef',
-                margin: 0,
-                overflowX: 'auto',
-                maxHeight: '220px',
-                overflowY: 'auto',
-              }}>
-                {JSON.stringify(job.result, null, 2)}
-              </pre>
+              <button
+                onClick={() => setShowResult(v => !v)}
+                style={{ ...btnStyle('#161a22', '#2a3142'), fontSize: '0.78rem', width: '100%', textAlign: 'left' }}
+              >
+                {showResult ? '▾ Ocultar resultado JSON' : '▸ Ver resultado JSON'}
+              </button>
+              {showResult && (
+                <pre style={{
+                  background: '#161a22', border: '1px solid #2a3142', borderRadius: '0 0 8px 8px',
+                  padding: '0.75rem 1rem', fontSize: '0.78rem',
+                  fontFamily: 'JetBrains Mono, Consolas, monospace', color: '#e6e9ef',
+                  margin: 0, overflowX: 'auto', maxHeight: '220px', overflowY: 'auto',
+                }}>
+                  {JSON.stringify(job.result, null, 2)}
+                </pre>
+              )}
             </div>
           )}
 
