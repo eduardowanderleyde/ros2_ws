@@ -447,6 +447,34 @@ export default function App() {
           {job?.result && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
 
+              {/* Métricas do bag */}
+              {job.result.bag_metrics && Object.keys(job.result.bag_metrics).length > 0 && (() => {
+                const m = job.result.bag_metrics
+                const cards = [
+                  m.duration_s          != null && { label: 'Duração',          value: `${m.duration_s} s`,              color: '#93c5fd' },
+                  m.odom_path_length_m  != null && { label: 'Percurso',          value: `${m.odom_path_length_m} m`,      color: '#6ee7b7' },
+                  m.odom_avg_speed_ms   != null && { label: 'Vel. média',        value: `${m.odom_avg_speed_ms} m/s`,     color: '#6ee7b7' },
+                  m.scan_avg_valid_points != null && { label: 'Scan pts válidos', value: `${m.scan_avg_valid_points}`,    color: '#fbbf24' },
+                  m.imu_accel_mean_ms2  != null && { label: 'IMU accel média',   value: `${m.imu_accel_mean_ms2} m/s²`,  color: '#c4b5fd' },
+                  m.imu_accel_variance_ms2 != null && { label: 'IMU variância',  value: `${m.imu_accel_variance_ms2}`,   color: '#c4b5fd' },
+                ].filter(Boolean)
+                return (
+                  <div style={{ background: '#161a22', border: '1px solid #2a3142', borderRadius: '8px', padding: '0.75rem 1rem' }}>
+                    <div style={{ fontSize: '0.75rem', color: '#8b92a8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.6rem' }}>
+                      Métricas da gravação
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
+                      {cards.map(({ label, value, color }) => (
+                        <div key={label} style={{ background: '#0d0f14', borderRadius: '6px', padding: '0.45rem 0.6rem' }}>
+                          <div style={{ fontSize: '0.68rem', color: '#8b92a8', marginBottom: '0.15rem' }}>{label}</div>
+                          <div style={{ fontSize: '0.85rem', fontWeight: 700, color, fontFamily: 'JetBrains Mono, monospace' }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })()}
+
               {/* Sensor summary */}
               {job.result.sensor_summary && Object.keys(job.result.sensor_summary).length > 0 && (
                 <div style={{ background: '#161a22', border: '1px solid #2a3142', borderRadius: '8px', padding: '0.75rem 1rem' }}>

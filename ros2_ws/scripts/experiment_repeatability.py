@@ -346,6 +346,130 @@ def _bag_sensor_summary(bag_path: Optional[str]) -> dict:
     return {}
 
 
+def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
+    """Lê mensagens do bag e calcula métricas: duração, percurso /odom, scan válido, IMU suavidade."""
+    if not bag_path:
+        return {}
+    import math as _math
+    try:
+        import rosbag2_py
+        from rosbag2_py import Info
+        from rclpy.serialization import deserialize_message
+
+        # duração via metadata
+        duration_s: Optional[float] = None
+        for storage in ("mcap", "sqlite3"):
+            try:
+                meta = Info().read_metadata(bag_path, storage)
+                if meta.duration.nanoseconds > 0:
+                    duration_s = meta.duration.nanoseconds / 1e9
+                break
+            except Exception:
+                continue
+
+        opts = rosbag2_py.ConverterOptions(
+            input_serialization_format="cdr",
+            output_serialization_format="cdr",
+        )
+
+        odom_path_m = 0.0
+        odom_speeds: list = []
+        prev_xy: Optional[Tuple[float, float]] = None
+        prev_t_ns: Optional[int] = None
+
+        scan_valid_counts: list = []
+
+        imu_accel_norms: list = []
+
+        for storage_id in ("mcap", "sqlite3"):
+            reader = rosbag2_py.SequentialReader()
+            try:
+                reader.open(rosbag2_py.StorageOptions(uri=bag_path, storage_id=storage_id), opts)
+            except Exception:
+                continue
+
+            topic_types = {m.name: m.type for m in reader.get_all_topics_and_types()}
+
+            while reader.has_next():
+                try:
+                    topic, data, t_ns = reader.read_next()
+                except Exception:
+                    break
+
+                if topic == "/odom" and "nav_msgs/msg/Odometry" in topic_types.get(topic, ""):
+                    from nav_msgs.msg import Odometry as _Odom
+                    msg = deserialize_message(data, _Odom)
+                    x = msg.pose.pose.position.x
+                    y = msg.pose.pose.position.y
+                    if prev_xy is not None:
+                        d = _math.hypot(x - prev_xy[0], y - prev_xy[1])
+                        odom_path_m += d
+                        if prev_t_ns is not None:
+                            dt = (t_ns - prev_t_ns) / 1e9
+                            if dt > 0:
+                                odom_speeds.append(d / dt)
+                    prev_xy = (x, y)
+                    prev_t_ns = t_ns
+
+                elif topic == "/scan" and "sensor_msgs/msg/LaserScan" in topic_types.get(topic, ""):
+                    from sensor_msgs.msg import LaserScan as _Scan
+                    msg = deserialize_message(data, _Scan)
+                    valid = sum(
+                        1 for r in msg.ranges
+                        if _math.isfinite(r) and msg.range_min < r < msg.range_max
+                    )
+                    scan_valid_counts.append(valid)
+
+                elif topic == "/imu" and "sensor_msgs/msg/Imu" in topic_types.get(topic, ""):
+                    from sensor_msgs.msg import Imu as _Imu
+                    msg = deserialize_message(data, _Imu)
+                    a = msg.linear_acceleration
+                    imu_accel_norms.append(_math.sqrt(a.x**2 + a.y**2 + a.z**2))
+
+            reader.close()
+            break  # leu com sucesso
+
+        metrics: dict = {}
+        if duration_s is not None:
+            metrics["duration_s"] = round(duration_s, 2)
+        if odom_path_m > 0:
+            metrics["odom_path_length_m"] = round(odom_path_m, 3)
+            if duration_s and duration_s > 0:
+                metrics["odom_avg_speed_ms"] = round(odom_path_m / duration_s, 3)
+        if scan_valid_counts:
+            metrics["scan_avg_valid_points"] = round(sum(scan_valid_counts) / len(scan_valid_counts), 1)
+            metrics["scan_min_valid_points"] = min(scan_valid_counts)
+        if imu_accel_norms:
+            mean_a = sum(imu_accel_norms) / len(imu_accel_norms)
+            variance_a = sum((v - mean_a) ** 2 for v in imu_accel_norms) / len(imu_accel_norms)
+            metrics["imu_accel_mean_ms2"] = round(mean_a, 3)
+            metrics["imu_accel_variance_ms2"] = round(variance_a, 4)
+
+        if metrics:
+            print("\n[TRACE] Métricas do bag:")
+            labels = {
+                "duration_s": "Duração",
+                "odom_path_length_m": "Percurso /odom",
+                "odom_avg_speed_ms": "Velocidade média",
+                "scan_avg_valid_points": "Scan pontos válidos (média)",
+                "scan_min_valid_points": "Scan pontos válidos (mín)",
+                "imu_accel_mean_ms2": "IMU aceleração média (m/s²)",
+                "imu_accel_variance_ms2": "IMU variância aceleração",
+            }
+            units = {
+                "duration_s": "s", "odom_path_length_m": "m",
+                "odom_avg_speed_ms": "m/s", "imu_accel_mean_ms2": "m/s²",
+            }
+            for k, v in metrics.items():
+                u = units.get(k, "")
+                print(f"  {labels.get(k, k)}: {v} {u}".rstrip())
+
+        return metrics
+    except Exception as e:
+        print(f"[TRACE] _bag_compute_metrics erro: {e}")
+        return {}
+
+
 def _write_export(
     path: str,
     payload: Dict[str, Any],
@@ -545,6 +669,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                     "disable_collection_message": disable_msg,
                     "rosbag_path": rosbag_path,
                     "sensor_summary": _bag_sensor_summary(rosbag_path),
+                    "bag_metrics": _bag_compute_metrics(rosbag_path),
                 },
                 args=args,
             )
@@ -736,6 +861,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     "disable_collection_message": disable_msg,
                     "rosbag_path": rosbag_path,
                     "sensor_summary": _bag_sensor_summary(rosbag_path),
+                    "bag_metrics": _bag_compute_metrics(rosbag_path),
                 },
                 args=args,
             )
