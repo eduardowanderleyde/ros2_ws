@@ -319,6 +319,33 @@ def _enable_collection_with_recovery(
     return resp2, ok2, err2, good2
 
 
+def _bag_sensor_summary(bag_path: Optional[str]) -> dict:
+    """Lê metadados do bag (MCAP/sqlite3) e devolve {topic: {msgs, hz_est}} por tópico gravado."""
+    if not bag_path:
+        return {}
+    try:
+        from rosbag2_py import Info
+        for storage in ("mcap", "sqlite3"):
+            try:
+                meta = Info().read_metadata(bag_path, storage)
+                dur = meta.duration.nanoseconds / 1e9 if meta.duration.nanoseconds > 0 else None
+                out: dict = {}
+                for ti in meta.topics_with_message_count:
+                    n = int(ti.message_count)
+                    hz = round(n / dur, 1) if dur and dur > 0 else None
+                    out[ti.topic_metadata.name] = {"msgs": n, "hz_est": hz}
+                print(f"\n[TRACE] Sensor summary ({storage}):")
+                for topic, stat in out.items():
+                    hz_str = f"  ~{stat['hz_est']} Hz" if stat["hz_est"] else ""
+                    print(f"  {topic}: {stat['msgs']} msgs{hz_str}")
+                return out
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {}
+
+
 def _write_export(
     path: str,
     payload: Dict[str, Any],
@@ -499,6 +526,7 @@ def cmd_record(args: argparse.Namespace) -> int:
 
         print(f"\nResumo: {'sem falhas' if fails == 0 else f'{fails} falha(s)'}")
         code = 0 if fails == 0 else 1
+        rosbag_path = _rosbag_path_from_disable_message(disable_msg)
         if args.export:
             _write_export(
                 args.export,
@@ -515,7 +543,8 @@ def cmd_record(args: argparse.Namespace) -> int:
                     "error_code": run_error_code,
                     "path_length_m_estimate": path_length_m_estimate,
                     "disable_collection_message": disable_msg,
-                    "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
+                    "rosbag_path": rosbag_path,
+                    "sensor_summary": _bag_sensor_summary(rosbag_path),
                 },
                 args=args,
             )
@@ -689,6 +718,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
         print(f"\nResumo: {'sem falhas' if fails == 0 else f'{fails} falha(s)'}")
         code = 0 if fails == 0 else 1
+        rosbag_path = _rosbag_path_from_disable_message(disable_msg)
         if args.export:
             _write_export(
                 args.export,
@@ -704,7 +734,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
                     "error_code": run_error_code,
                     "path_length_m_estimate": path_length_m_estimate,
                     "disable_collection_message": disable_msg,
-                    "rosbag_path": _rosbag_path_from_disable_message(disable_msg),
+                    "rosbag_path": rosbag_path,
+                    "sensor_summary": _bag_sensor_summary(rosbag_path),
                 },
                 args=args,
             )

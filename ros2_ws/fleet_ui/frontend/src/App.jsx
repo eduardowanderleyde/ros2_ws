@@ -445,23 +445,54 @@ export default function App() {
           </div>
 
           {job?.result && (
-            <div>
-              <button
-                onClick={() => setShowResult(v => !v)}
-                style={{ ...btnStyle('#161a22', '#2a3142'), fontSize: '0.78rem', width: '100%', textAlign: 'left' }}
-              >
-                {showResult ? '▾ Ocultar resultado JSON' : '▸ Ver resultado JSON'}
-              </button>
-              {showResult && (
-                <pre style={{
-                  background: '#161a22', border: '1px solid #2a3142', borderRadius: '0 0 8px 8px',
-                  padding: '0.75rem 1rem', fontSize: '0.78rem',
-                  fontFamily: 'JetBrains Mono, Consolas, monospace', color: '#e6e9ef',
-                  margin: 0, overflowX: 'auto', maxHeight: '220px', overflowY: 'auto',
-                }}>
-                  {JSON.stringify(job.result, null, 2)}
-                </pre>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+
+              {/* Sensor summary */}
+              {job.result.sensor_summary && Object.keys(job.result.sensor_summary).length > 0 && (
+                <div style={{ background: '#161a22', border: '1px solid #2a3142', borderRadius: '8px', padding: '0.75rem 1rem' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#8b92a8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.5rem' }}>
+                    Sensores gravados
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem', fontFamily: 'JetBrains Mono, Consolas, monospace' }}>
+                    <thead>
+                      <tr>
+                        {['Tópico', 'Msgs', 'Hz est.'].map(h => (
+                          <th key={h} style={{ textAlign: 'left', color: '#8b92a8', fontWeight: 500, paddingBottom: '0.3rem', borderBottom: '1px solid #2a3142' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(job.result.sensor_summary).map(([topic, stat]) => (
+                        <tr key={topic}>
+                          <td style={{ color: '#93c5fd', padding: '0.2rem 0.5rem 0.2rem 0' }}>{topic}</td>
+                          <td style={{ color: stat.msgs > 0 ? '#6ee7b7' : '#f87171', padding: '0.2rem 0.5rem' }}>{stat.msgs}</td>
+                          <td style={{ color: '#e6e9ef', padding: '0.2rem 0' }}>{stat.hz_est != null ? `~${stat.hz_est} Hz` : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
+
+              {/* JSON colapsável */}
+              <div>
+                <button
+                  onClick={() => setShowResult(v => !v)}
+                  style={{ ...btnStyle('#161a22', '#2a3142'), fontSize: '0.78rem', width: '100%', textAlign: 'left' }}
+                >
+                  {showResult ? '▾ Ocultar resultado JSON' : '▸ Ver resultado JSON'}
+                </button>
+                {showResult && (
+                  <pre style={{
+                    background: '#161a22', border: '1px solid #2a3142', borderRadius: '0 0 8px 8px',
+                    padding: '0.75rem 1rem', fontSize: '0.78rem',
+                    fontFamily: 'JetBrains Mono, Consolas, monospace', color: '#e6e9ef',
+                    margin: 0, overflowX: 'auto', maxHeight: '220px', overflowY: 'auto',
+                  }}>
+                    {JSON.stringify(job.result, null, 2)}
+                  </pre>
+                )}
+              </div>
             </div>
           )}
 
