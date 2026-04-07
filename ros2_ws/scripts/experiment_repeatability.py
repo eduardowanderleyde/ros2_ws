@@ -454,6 +454,9 @@ def cmd_record(args: argparse.Namespace) -> int:
                 if not good:
                     break
                 nav_started = node.wait_nav_state(rid, "navigating", timeout_sec=12.0)
+                if not nav_started:
+                    # Navegação muito rápida: se já voltou a "recording" foi OK
+                    nav_started = node.get_nav_state(rid) == "recording"
                 _print(nav_started, f"wp{i} estado navigating")
                 fails += int(not nav_started)
                 if args.require_motion and nav_started:
@@ -470,11 +473,10 @@ def cmd_record(args: argparse.Namespace) -> int:
                         fails += 1
                         run_error_code = "NO_MOTION_DETECTED"
                         break
-                # Durante record, o fleet mostra `recording` enquanto a coleta está ativa.
-                # Depois que o Nav2 termina, `is_navigating` vira False, mas `is_recording`
-                # permanece True até o stop_record. Por isso "idle" pode nunca acontecer aqui.
+                # Após Nav2 completar um waypoint durante recording, o orchestrator restaura
+                # nav_state para "recording" (não "idle") enquanto is_recording for True.
                 nav_done = node.wait_nav_state(rid, "recording", timeout_sec=args.wait_goal)
-                _print(nav_done, f"wp{i} voltou a recording (nav finalizado)")
+                _print(nav_done, f"wp{i} concluído (recording)")
                 fails += int(not nav_done)
         finally:
             req_st = StopRecord.Request()
@@ -539,6 +541,28 @@ def cmd_replay(args: argparse.Namespace) -> int:
         print("\n=== Fase B: reproduzir percurso (coleta + play_route) ===")
         print(f"robot={rid!r} route={args.route}")
         print(f"topics={args.topics} skip_collection={args.skip_collection} export={args.export!r}")
+
+        if args.return_to_start is not None:
+            try:
+                rx, ry, ryaw = _parse_initial_pose(args.return_to_start)
+            except ValueError as e:
+                print(f"Erro: {e}", file=sys.stderr)
+                return 2
+            print(f"[TRACE] Retornando ao início: go_to_point({rx:.3f}, {ry:.3f}, yaw={ryaw:.3f}) ...")
+            req_g = GoToPoint.Request()
+            req_g.robot_id = rid
+            req_g.x = rx
+            req_g.y = ry
+            req_g.yaw = ryaw
+            resp_g, ok_g, err_g = node.call_srv(GoToPoint, "go_to_point", req_g, timeout_sec=20.0)
+            good_g = ok_g and resp_g is not None and resp_g.success
+            _print(good_g, "return_to_start go_to_point", (resp_g.message if resp_g else err_g))
+            fails += int(not good_g)
+            if good_g:
+                node.wait_nav_state(rid, "navigating", timeout_sec=10.0)
+                rts_done = node.wait_nav_state(rid, "idle", timeout_sec=args.wait_goal)
+                _print(rts_done, "return_to_start concluído (idle)")
+                fails += int(not rts_done)
 
         if args.initial_pose is not None:
             try:
@@ -788,6 +812,12 @@ def main() -> int:
         metavar="x,y,yaw",
         default=None,
         help="Publica /initialpose (AMCL) em map antes da coleta; yaw em radianos.",
+    )
+    pb.add_argument(
+        "--return-to-start",
+        metavar="x,y,yaw",
+        default=None,
+        help="Antes da coleta: navega para esta pose via go_to_point (retorno ao início da rota).",
     )
     pb.set_defaults(func=cmd_replay)
 

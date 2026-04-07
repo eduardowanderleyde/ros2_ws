@@ -1,350 +1,315 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 
 const API = '/api'
-const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/status`
 
-// Mundo padrão: -5 a 5 em x e y (metros)
-const WORLD = { minX: -5, maxX: 5, minY: -5, maxY: 5 }
+const EXAMPLE_RECORD = JSON.stringify({
+  command: "record",
+  robot: "default",
+  route: "percurso1",
+  collect: true,
+  topics: ["scan", "odom", "imu"],
+  initial_pose: [0, 0, 0],
+  points: [
+    [0.5, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.5, 0.5, 0.0],
+    [2.0, 0.5, 0.0]
+  ]
+}, null, 2)
 
-function pixelToWorld(px, py, width, height) {
-  const x = WORLD.minX + (px / width) * (WORLD.maxX - WORLD.minX)
-  const y = WORLD.maxY - (py / height) * (WORLD.maxY - WORLD.minY)
-  return { x, y }
-}
-
-function worldToPixel(x, y, width, height) {
-  const px = ((x - WORLD.minX) / (WORLD.maxX - WORLD.minX)) * width
-  const py = (1 - (y - WORLD.minY) / (WORLD.maxY - WORLD.minY)) * height
-  return { px, py }
-}
+const EXAMPLE_REPLAY = JSON.stringify({
+  command: "replay",
+  robot: "default",
+  route: "percurso1",
+  collect: true,
+  topics: ["scan", "odom", "imu"],
+  initial_pose: [0, 0, 0],
+  return_to_start: [0, 0, 0]
+}, null, 2)
 
 export default function App() {
-  const [status, setStatus] = useState({ robots: [] })
-  const [wsLive, setWsLive] = useState(false)
-  const [selectedRobot, setSelectedRobot] = useState('')
-  const [routeName, setRouteName] = useState('r1')
-  const [routeList, setRouteList] = useState([])
-  const [target, setTarget] = useState(null)
-  const [toast, setToast] = useState(null)
-  const mapRef = useRef(null)
-  const wsRef = useRef(null)
+  const [config, setConfig]       = useState(EXAMPLE_RECORD)
+  const [jobId, setJobId]         = useState(null)
+  const [job, setJob]             = useState(null)
+  const [running, setRunning]     = useState(false)
+  const [parseError, setParseError] = useState(null)
+  const [showResult, setShowResult] = useState(false)
+  const [status, setStatus]       = useState({ robots: [], pose: { x: 0, y: 0, yaw: 0, valid: false } })
+  const [resetMsg, setResetMsg]   = useState(null)
+  const [resetting, setResetting] = useState(false)
+  const outputRef = useRef(null)
+  const pollRef   = useRef(null)
 
-  const showToast = (msg, isError = false) => {
-    setToast({ msg, error: isError })
-    setTimeout(() => setToast(null), 3500)
-  }
-
-  const fetchJson = async (url, options = {}) => {
-    const r = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers } })
-    const data = await r.json().catch(() => ({}))
-    return { ok: r.ok, data }
-  }
-
-  const call = async (path, method = 'POST') => {
-    const url = `${API}${path}`
-    const { ok, data } = await fetchJson(url, { method })
-    return { ok, data }
-  }
-
-  const refetchStatus = useCallback(() => {
-    fetch(`${API}/status`)
-      .then((r) => r.json())
-      .then((data) => data && setStatus(data))
-      .catch(() => {})
-  }, [])
-
-  const afterAction = useCallback(() => {
-    refetchStatus()
-    const t1 = setTimeout(refetchStatus, 800)
-    const t2 = setTimeout(refetchStatus, 1600)
-    return () => { clearTimeout(t1); clearTimeout(t2) }
-  }, [refetchStatus])
-
-  const loadRoutes = useCallback(async () => {
-    const { data } = await call(`/list_routes?robot_id=${encodeURIComponent(selectedRobot)}`, 'GET')
-    setRouteList(data.route_names || [])
-  }, [selectedRobot])
-
+  // ── Status do robot (polling simples) ────────────────────────────
   useEffect(() => {
-    fetch(`${API}/list_robots`)
-      .then((r) => r.json())
-      .then((data) => {
-        const ids = data.robot_ids || []
-        if (ids.length) setSelectedRobot((prev) => prev || ids[0] || '')
-      })
-      .catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    loadRoutes()
-  }, [loadRoutes, selectedRobot])
-
-  useEffect(() => {
-    let closed = false
-    const connect = () => {
-      const ws = new WebSocket(WS_URL)
-      ws.onopen = () => { setWsLive(true); wsRef.current = ws }
-      ws.onclose = () => { setWsLive(false); wsRef.current = null; if (!closed) setTimeout(connect, 2000) }
-      ws.onerror = () => {}
-      ws.onmessage = (e) => {
-        try {
-          const next = JSON.parse(e.data)
-          setStatus(next)
-        } catch (_) {}
-      }
-    }
-    connect()
-    return () => { closed = true }
-  }, [])
-
-  useEffect(() => {
-    if (wsLive) return
-    const t = setInterval(refetchStatus, 1000)
+    const t = setInterval(() =>
+      fetch(`${API}/status`).then(r => r.json()).then(d => d && setStatus(d)).catch(() => {}),
+    1000)
     return () => clearInterval(t)
-  }, [wsLive, refetchStatus])
-
-  const handleMapClick = (e) => {
-    const canvas = mapRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
-    const px = (e.clientX - rect.left) * scaleX
-    const py = (e.clientY - rect.top) * scaleY
-    const { x, y } = pixelToWorld(px, py, canvas.width, canvas.height)
-    setTarget({ x, y })
-  }
-
-  const drawMap = useCallback((ctx, w, h) => {
-    ctx.fillStyle = '#0f1219'
-    ctx.fillRect(0, 0, w, h)
-    const step = 40
-    ctx.strokeStyle = '#1e2433'
-    ctx.lineWidth = 1
-    for (let i = 0; i <= w; i += step) {
-      ctx.beginPath()
-      ctx.moveTo(i, 0)
-      ctx.lineTo(i, h)
-      ctx.stroke()
-    }
-    for (let j = 0; j <= h; j += step) {
-      ctx.beginPath()
-      ctx.moveTo(0, j)
-      ctx.lineTo(w, j)
-      ctx.stroke()
-    }
-    ctx.strokeStyle = '#2a3142'
-    const cx = (0 - WORLD.minX) / (WORLD.maxX - WORLD.minX) * w
-    const cy = (1 - (0 - WORLD.minY) / (WORLD.maxY - WORLD.minY)) * h
-    ctx.beginPath()
-    ctx.moveTo(cx, 0)
-    ctx.lineTo(cx, h)
-    ctx.moveTo(0, cy)
-    ctx.lineTo(w, cy)
-    ctx.stroke()
   }, [])
 
-  const resizeCanvas = useCallback(() => {
-    const canvas = mapRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const dpr = window.devicePixelRatio || 1
-    if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
-      canvas.width = rect.width * dpr
-      canvas.height = rect.height * dpr
-    }
-    const ctx = canvas.getContext('2d')
-    ctx.setTransform(1, 0, 0, 1, 0, 0)
-    ctx.scale(dpr, dpr)
-    const w = rect.width
-    const h = rect.height
-    drawMap(ctx, w, h)
-    if (target) {
-      const { px, py } = worldToPixel(target.x, target.y, w, h)
-      ctx.fillStyle = '#6ee7b7'
-      ctx.beginPath()
-      ctx.arc(px, py, 8, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.strokeStyle = '#0d0f14'
-      ctx.lineWidth = 2
-      ctx.stroke()
-    }
-  }, [drawMap, target])
+  // ── Polling do job ────────────────────────────────────────────────
+  const startPolling = useCallback((id) => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = setInterval(async () => {
+      const r = await fetch(`${API}/job/${id}`).catch(() => null)
+      if (!r) return
+      const data = await r.json().catch(() => null)
+      if (!data) return
+      setJob(data)
+      if (!data.running) {
+        clearInterval(pollRef.current)
+        setRunning(false)
+      }
+    }, 500)
+  }, [])
 
+  // Auto-scroll output
   useEffect(() => {
-    resizeCanvas()
-    window.addEventListener('resize', resizeCanvas)
-    return () => window.removeEventListener('resize', resizeCanvas)
-  }, [resizeCanvas])
+    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight
+  }, [job?.lines?.length])
 
-  const q = (params) => new URLSearchParams(params).toString()
+  const run = async () => {
+    setParseError(null)
+    let cfg
+    try { cfg = JSON.parse(config) }
+    catch (e) { setParseError(`JSON inválido: ${e.message}`); return }
 
-  const goToPoint = async () => {
-    if (!isMobile) {
-      showToast('Role selecionado não permite movimento (somente MUUT).', true)
+    setRunning(true)
+    setJob(null)
+    setJobId(null)
+
+    const r = await fetch(`${API}/run_config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    }).catch(e => { setRunning(false); setParseError(`Erro: ${e.message}`); return null })
+    if (!r) return
+
+    const data = await r.json().catch(() => null)
+    if (!data?.job_id) {
+      setRunning(false)
+      setParseError(data?.message || 'Erro ao iniciar job')
       return
     }
-    if (!target) return
-    const { ok, data } = await call(`/go_to_point?${q({ robot_id: selectedRobot, x: target.x, y: target.y, yaw: 0 })}`, 'POST')
-    showToast(ok ? 'Go to point enviado.' : (data?.message || 'Erro'), !ok)
-    if (ok) afterAction()
+    setJobId(data.job_id)
+    startPolling(data.job_id)
   }
 
-  const startRecord = async () => {
-    const { ok, data } = await call(`/start_record?${q({ robot_id: selectedRobot, route_name: routeName })}`, 'POST')
-    showToast(ok ? 'Record iniciado.' : (data?.message || 'Erro'), !ok)
-    if (ok) { loadRoutes(); afterAction() }
+  const stop = () => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    setRunning(false)
   }
 
-  const stopRecord = async () => {
-    const { ok, data } = await call(`/stop_record?${q({ robot_id: selectedRobot })}`, 'POST')
-    showToast(ok ? 'Record parado. Rota salva.' : (data?.message || 'Erro'), !ok)
-    if (ok) { loadRoutes(); afterAction() }
+  const pose = status.pose || {}
+  const robot = status.robots?.[0] || {}
+
+  const lineColor = (line) => {
+    if (line.includes('[OK]'))     return '#6ee7b7'
+    if (line.includes('[FALHOU]')) return '#f87171'
+    if (line.includes('[TRACE]'))  return '#8b92a8'
+    if (line.includes('Resumo'))   return '#fbbf24'
+    if (line.includes('==='))      return '#93c5fd'
+    return '#e6e9ef'
   }
 
-  const playRoute = async () => {
-    const { ok, data } = await call(`/play_route?${q({ robot_id: selectedRobot, route_name: routeName })}`, 'POST')
-    showToast(ok ? 'Play route enviado.' : (data?.message || 'Erro'), !ok)
-    if (ok) afterAction()
+  const resetToOrigin = async () => {
+    setResetting(true)
+    setResetMsg(null)
+    try {
+      const r = await fetch(`${API}/go_to_point?x=0&y=0&yaw=0`, { method: 'POST' })
+      const data = await r.json()
+      setResetMsg(data.success ? 'ok' : 'erro')
+    } catch {
+      setResetMsg('erro')
+    } finally {
+      setResetting(false)
+      setTimeout(() => setResetMsg(null), 3000)
+    }
   }
 
-  const cancel = async () => {
-    const { ok, data } = await call(`/cancel?${q({ robot_id: selectedRobot })}`, 'POST')
-    showToast(ok ? 'Cancelado.' : (data?.message || 'Erro'), !ok)
-    if (ok) afterAction()
-  }
-
-  const enableCollection = async () => {
-    const { ok, data } = await call(`/enable_collection?${q({ robot_id: selectedRobot })}`, 'POST')
-    showToast(ok ? 'Coleta ativada.' : (data?.message || 'Erro'), !ok)
-    if (ok) afterAction()
-  }
-
-  const disableCollection = async () => {
-    const { ok, data } = await call(`/disable_collection?${q({ robot_id: selectedRobot })}`, 'POST')
-    showToast(ok ? 'Coleta desativada.' : (data?.message || 'Erro'), !ok)
-    if (ok) afterAction()
-  }
-
-  const robots = status.robots.length
-    ? status.robots
-    : [{ robot_id: '', role: 'MUUT', nav_state: 'idle', current_route: '', collection_on: false, collection_file: '', last_error: '', bytes_written: 0 }]
-
-  const selectedRobotState = robots.find((r) => r.robot_id === selectedRobot) || robots[0]
-  const collectionOn = selectedRobotState.collection_on
-  const selectedRole = selectedRobotState.role || 'MUUT'
-  const isMobile = selectedRole === 'MUUT'
+  const deg = r => (r * 180 / Math.PI).toFixed(1)
 
   return (
-    <div className="app">
-      <header className="header">
-        <h1>Fleet UI</h1>
-        <span className={`status-badge ${wsLive ? 'live' : ''}`}>
-          {wsLive ? 'Status ao vivo' : 'Polling'}
-        </span>
-      </header>
+    <div style={{ fontFamily: 'system-ui, sans-serif', background: '#0d0f14', color: '#e6e9ef', minHeight: '100vh', padding: '1.5rem' }}>
 
-      <div className="grid">
-        <div>
-          <div className="panel">
-            <h2>Mapa (clique para definir destino)</h2>
-            <div className="map-container">
-              <canvas
-                ref={mapRef}
-                className="map-canvas"
-                onClick={handleMapClick}
-                style={{ width: '100%', height: '100%' }}
-              />
-              <div className="map-overlay">
-                <span>
-                  {target ? `x: ${target.x.toFixed(2)} m  y: ${target.y.toFixed(2)} m` : 'Clique no mapa'}
-                </span>
-                <button className="btn btn-go" disabled={!target || !isMobile} onClick={goToPoint}>
-                  Ir para ponto
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="panel" style={{ marginTop: '1rem' }}>
-            <h2>Controles ({selectedRole})</h2>
-            <div className="controls">
-              <label>
-                Robô:
-                <select value={selectedRobot} onChange={(e) => setSelectedRobot(e.target.value)}>
-                  {robots.map((r) => (
-                    <option key={r.robot_id || 'default'} value={r.robot_id}>{r.robot_id || '(default)'}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Rota:
-                <input
-                  type="text"
-                  value={routeName}
-                  onChange={(e) => setRouteName(e.target.value)}
-                  placeholder="r1"
-                  list="routes"
-                />
-                <datalist id="routes">
-                  {routeList.map((name) => <option key={name} value={name} />)}
-                </datalist>
-              </label>
-            </div>
-            <div className="controls">
-              <button className="btn btn-primary" onClick={startRecord} disabled={!isMobile}>Iniciar gravação</button>
-              <button className="btn" onClick={stopRecord} disabled={!isMobile}>Parar gravação</button>
-              <button className="btn btn-primary" onClick={playRoute} disabled={!isMobile}>Reproduzir rota</button>
-              <button className="btn btn-danger" onClick={cancel} disabled={!isMobile}>Cancelar</button>
-              {collectionOn ? (
-                <button className="btn btn-danger" onClick={disableCollection}>Desligar coleta</button>
-              ) : (
-                <button className="btn btn-primary" onClick={enableCollection}>Ligar coleta</button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="panel">
-          <h2>Status da frota</h2>
-          <div className="robot-cards">
-            {robots.map((r) => (
-              <div key={r.robot_id} className="robot-card">
-                <h3>{r.robot_id || '(default)'}</h3>
-                <div className="row">
-                  <span>Papel</span>
-                  <span>{r.role || 'MUUT'}</span>
-                </div>
-                <div className="row">
-                  <span>Nav</span>
-                  <span className={`nav-state ${r.nav_state}`}>{r.nav_state}</span>
-                </div>
-                <div className="row">
-                  <span>Rota atual</span>
-                  <span>{r.current_route || '—'}</span>
-                </div>
-                <div className={`row ${r.collection_on ? 'collection-on' : ''}`}>
-                  <span>Coleta</span>
-                  <span>{r.collection_on ? 'ON' : 'OFF'}</span>
-                </div>
-                {r.collection_file && (
-                  <div className="row">
-                    <span>Arquivo</span>
-                    <span style={{ fontSize: '0.7rem', wordBreak: 'break-all' }}>{r.collection_file}</span>
-                  </div>
-                )}
-                {r.last_error && <div className="error-msg">{r.last_error}</div>}
-              </div>
-            ))}
-          </div>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', borderBottom: '1px solid #2a3142', paddingBottom: '1rem' }}>
+        <h1 style={{ margin: 0, fontSize: '1.4rem', color: '#6ee7b7' }}>Fleet UI</h1>
+        <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.82rem', fontFamily: 'monospace' }}>
+          <span style={{ color: '#8b92a8' }}>
+            Nav: <span style={{ color: robot.nav_state === 'navigating' ? '#6ee7b7' : robot.nav_state === 'failed' ? '#f87171' : '#e6e9ef' }}>
+              {robot.nav_state || '—'}
+            </span>
+          </span>
+          <span style={{ color: '#8b92a8' }}>
+            Coleta: <span style={{ color: robot.collection_on ? '#6ee7b7' : '#8b92a8' }}>{robot.collection_on ? 'ON' : 'OFF'}</span>
+          </span>
+          <span style={{ color: '#8b92a8' }}>
+            Pose: <span style={{ color: pose.valid ? '#e6e9ef' : '#8b92a8' }}>
+              {pose.valid ? `x=${pose.x.toFixed(2)} y=${pose.y.toFixed(2)} yaw=${deg(pose.yaw)}°` : 'aguardando…'}
+            </span>
+          </span>
+          <button
+            onClick={resetToOrigin}
+            disabled={resetting}
+            title="Envia robô para (0, 0, 0)"
+            style={{
+              ...btnStyle(resetting ? '#1a2a3a' : '#161a22', resetMsg === 'erro' ? '#f87171' : resetMsg === 'ok' ? '#6ee7b7' : '#6366f1'),
+              fontSize: '0.78rem',
+              padding: '0.3rem 0.75rem',
+            }}
+          >
+            {resetting ? '⏳ indo…' : resetMsg === 'ok' ? '✓ indo' : resetMsg === 'erro' ? '✗ falhou' : '⟳ Reiniciar'}
+          </button>
         </div>
       </div>
 
-      {toast && (
-        <div className={`toast ${toast.error ? 'error' : 'success'}`}>
-          {toast.msg}
+      {/* Layout */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.25rem', height: 'calc(100vh - 120px)' }}>
+
+        {/* Coluna esquerda: config */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#8b92a8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Configuração (JSON)
+            </span>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button onClick={() => setConfig(EXAMPLE_RECORD)}
+                style={btnStyle('#161a22', '#2a3142')}>Exemplo record</button>
+              <button onClick={() => setConfig(EXAMPLE_REPLAY)}
+                style={btnStyle('#161a22', '#2a3142')}>Exemplo replay</button>
+            </div>
+          </div>
+
+          <textarea
+            value={config}
+            onChange={e => { setConfig(e.target.value); setParseError(null) }}
+            spellCheck={false}
+            style={{
+              flex: 1,
+              background: '#161a22',
+              border: `1px solid ${parseError ? '#f87171' : '#2a3142'}`,
+              borderRadius: '8px',
+              color: '#e6e9ef',
+              fontFamily: 'JetBrains Mono, Consolas, monospace',
+              fontSize: '0.85rem',
+              padding: '1rem',
+              resize: 'none',
+              outline: 'none',
+              lineHeight: 1.6,
+            }}
+          />
+
+          {parseError && (
+            <div style={{ color: '#f87171', fontSize: '0.82rem', padding: '0.5rem 0.75rem', background: 'rgba(248,113,113,0.1)', borderRadius: '6px' }}>
+              {parseError}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button
+              onClick={run}
+              disabled={running}
+              style={btnStyle(running ? '#1a3a2a' : '#065f46', '#6ee7b7', '1rem', running)}
+            >
+              {running ? '⏳ A executar…' : '▶ Executar'}
+            </button>
+            {running && (
+              <button onClick={stop} style={btnStyle('#3a1a1a', '#f87171')}>
+                ■ Parar polling
+              </button>
+            )}
+          </div>
         </div>
-      )}
+
+        {/* Coluna direita: output */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', minHeight: 0, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#8b92a8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Output {jobId && <span style={{ color: '#3b82f6', fontWeight: 400 }}>#{jobId}</span>}
+            </span>
+            {job && !job.running && (
+              <span style={{ fontSize: '0.82rem', color: job.exit_code === 0 ? '#6ee7b7' : '#f87171', fontWeight: 600 }}>
+                {job.exit_code === 0 ? '✓ Sucesso' : `✗ Falhou (exit ${job.exit_code})`}
+              </span>
+            )}
+          </div>
+
+          {/* Log */}
+          <div
+            ref={outputRef}
+            style={{
+              flex: 1,
+              background: '#161a22',
+              border: '1px solid #2a3142',
+              borderRadius: '8px',
+              padding: '0.75rem 1rem',
+              overflowY: 'auto',
+              fontFamily: 'JetBrains Mono, Consolas, monospace',
+              fontSize: '0.78rem',
+              lineHeight: 1.7,
+            }}
+          >
+            {!job && !running && (
+              <span style={{ color: '#8b92a8' }}>Aguardando execução…</span>
+            )}
+            {job?.lines?.map((line, i) => (
+              <div key={i} style={{ color: lineColor(line), whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {line}
+              </div>
+            ))}
+            {running && (
+              <div style={{ color: '#8b92a8', animation: 'blink 1s step-end infinite' }}>▌</div>
+            )}
+          </div>
+
+          {/* Resultado final — colapsável */}
+          {job?.result && (
+            <div>
+              <button
+                onClick={() => setShowResult(v => !v)}
+                style={{ ...btnStyle('#161a22', '#2a3142'), fontSize: '0.78rem', width: '100%', textAlign: 'left' }}
+              >
+                {showResult ? '▾ Ocultar resultado JSON' : '▸ Ver resultado JSON'}
+              </button>
+              {showResult && (
+                <pre style={{
+                  background: '#161a22', border: '1px solid #2a3142', borderRadius: '0 0 8px 8px',
+                  padding: '0.75rem 1rem', fontSize: '0.78rem',
+                  fontFamily: 'JetBrains Mono, Consolas, monospace', color: '#e6e9ef',
+                  margin: 0, overflowX: 'auto', maxHeight: '220px', overflowY: 'auto',
+                }}>
+                  {JSON.stringify(job.result, null, 2)}
+                </pre>
+              )}
+            </div>
+          )}
+
+          {job?.error && (
+            <div style={{ color: '#f87171', fontSize: '0.82rem', padding: '0.5rem 0.75rem', background: 'rgba(248,113,113,0.1)', borderRadius: '6px' }}>
+              Erro interno: {job.error}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <style>{`@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }`}</style>
     </div>
   )
+}
+
+function btnStyle(bg, color, fontSize = '0.85rem', disabled = false) {
+  return {
+    background: bg,
+    color,
+    border: `1px solid ${color}`,
+    borderRadius: '8px',
+    padding: '0.5rem 1rem',
+    fontSize,
+    fontWeight: 600,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.6 : 1,
+    fontFamily: 'inherit',
+  }
 }
