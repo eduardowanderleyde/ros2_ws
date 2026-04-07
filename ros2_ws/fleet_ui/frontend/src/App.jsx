@@ -48,19 +48,31 @@ export default function App() {
   const [resetting, setResetting]   = useState(false)
 
   // ── Conexão ────────────────────────────────────────────────────────
-  const [connPanel, setConnPanel]       = useState(false)   // painel aberto?
+  const [connPanel, setConnPanel]       = useState(false)
   const [selectedProfile, setSelectedProfile] = useState('custom')
   const [connStatus, setConnStatus]     = useState('idle')  // idle | connecting | connected | error
   const [connMsg, setConnMsg]           = useState('')
+
+  // ── Descoberta de robôs ───────────────────────────────────────────
+  const [discoverPanel, setDiscoverPanel] = useState(false)
+  const [discovering, setDiscovering]     = useState(false)
+  const [discovered, setDiscovered]       = useState([])    // [{ip, hostname, likely_robot}]
+  const [discoverError, setDiscoverError] = useState(null)
+  const [subnet, setSubnet]               = useState('')
+  const [testingSSH, setTestingSSH]       = useState({})    // ip → 'testing'|'ok'|'no_ros'|'error'
+  const [sshUser, setSshUser]             = useState('ubuntu')
+  const [extraProfiles, setExtraProfiles] = useState([])    // perfis adicionados via descoberta
+  const discoverRef                       = useRef(null)
 
   const outputRef  = useRef(null)
   const pollRef    = useRef(null)
   const panelRef   = useRef(null)
 
-  // Fecha painel ao clicar fora
+  // Fecha painéis ao clicar fora
   useEffect(() => {
     const handler = (e) => {
       if (panelRef.current && !panelRef.current.contains(e.target)) setConnPanel(false)
+      if (discoverRef.current && !discoverRef.current.contains(e.target)) setDiscoverPanel(false)
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -120,6 +132,47 @@ export default function App() {
     } catch (e) {
       setConnStatus('error')
       setConnMsg(`Backend não respondeu: ${e.message}`)
+    }
+  }
+
+  const discoverRobots = async () => {
+    setDiscovering(true)
+    setDiscovered([])
+    setDiscoverError(null)
+    try {
+      const url = subnet ? `${API}/discover_robots?subnet=${encodeURIComponent(subnet)}` : `${API}/discover_robots`
+      const r = await fetch(url, { signal: AbortSignal.timeout(30000) })
+      const data = await r.json()
+      if (data.error) { setDiscoverError(data.error); return }
+      setDiscovered(data.found || [])
+      if ((data.found || []).length === 0) setDiscoverError(`Nenhum host com SSH encontrado em ${data.subnet_scanned}.0/24`)
+    } catch (e) {
+      setDiscoverError(`Erro: ${e.message}`)
+    } finally {
+      setDiscovering(false)
+    }
+  }
+
+  const testSSH = async (ip) => {
+    setTestingSSH(prev => ({ ...prev, [ip]: 'testing' }))
+    try {
+      const r = await fetch(`${API}/test_ssh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: ip, user: sshUser }),
+      })
+      const data = await r.json()
+      setTestingSSH(prev => ({ ...prev, [ip]: data.success && data.has_ros2 ? 'ok' : data.success ? 'no_ros' : 'error' }))
+      if (data.success && data.has_ros2) {
+        // Adiciona como perfil seleccionável no painel Conectar
+        setExtraProfiles(prev => {
+          const exists = prev.find(p => p.host === ip)
+          if (exists) return prev
+          return [...prev, { id: `ssh_${ip}`, label: `SSH ${ip} (${sshUser})`, type: 'ssh', host: ip, user: sshUser }]
+        })
+      }
+    } catch {
+      setTestingSSH(prev => ({ ...prev, [ip]: 'error' }))
     }
   }
 
@@ -227,117 +280,174 @@ export default function App() {
       </div>
 
       {/* ── Barra de conexão ────────────────────────────────────────── */}
-      <div ref={panelRef} style={{ position: 'relative', marginBottom: '1.25rem' }}>
-        {/* Botão principal */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+      <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginBottom: '1.25rem', position: 'relative' }}>
+
+        {/* Botão Conectar robô */}
+        <div ref={panelRef} style={{ position: 'relative' }}>
           <button
-            onClick={() => setConnPanel(v => !v)}
+            onClick={() => { setConnPanel(v => !v); setDiscoverPanel(false) }}
             style={{ ...btnStyle('#161a22', '#6366f1'), display: 'flex', alignItems: 'center', gap: '0.5rem' }}
           >
             <span style={{ width: 10, height: 10, borderRadius: '50%', background: connLight, display: 'inline-block', boxShadow: connStatus === 'connected' ? `0 0 6px ${connLight}` : 'none', transition: 'background 0.3s' }} />
             Conectar robô
             <span style={{ fontSize: '0.7rem', opacity: 0.7 }}>{connPanel ? '▲' : '▼'}</span>
           </button>
-          {isConnected && (
-            <span style={{ fontSize: '0.8rem', color: '#6ee7b7', fontFamily: 'monospace' }}>
-              ● Conectado — {profile?.label}
-            </span>
-          )}
-          {connStatus === 'error' && (
-            <span style={{ fontSize: '0.8rem', color: '#f87171', fontFamily: 'monospace' }}>
-              ✗ {connMsg}
-            </span>
+
+          {connPanel && (
+            <div style={{
+              position: 'absolute', top: '2.5rem', left: 0, zIndex: 100,
+              background: '#161a22', border: '1px solid #2a3142', borderRadius: '10px',
+              padding: '1rem', width: '360px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            }}>
+              <div style={{ fontSize: '0.78rem', color: '#8b92a8', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Selecionar robô
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
+                {[...ROBOT_PROFILES, ...extraProfiles].map(p => {
+                  const isSSH      = p.type === 'ssh' && !extraProfiles.find(ep => ep.id === p.id)
+                  const isSelected = selectedProfile === p.id
+                  const isExtra    = !!extraProfiles.find(ep => ep.id === p.id)
+                  return (
+                    <label
+                      key={p.id}
+                      onClick={() => setSelectedProfile(p.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '0.75rem',
+                        padding: '0.6rem 0.85rem', borderRadius: '8px',
+                        border: `1px solid ${isSelected ? '#6366f1' : '#2a3142'}`,
+                        background: isSelected ? 'rgba(99,102,241,0.1)' : 'transparent',
+                        cursor: 'pointer',
+                        transition: 'border-color 0.2s, background 0.2s',
+                      }}
+                    >
+                      <input type="radio" name="robot_profile" value={p.id} checked={isSelected}
+                        onChange={() => setSelectedProfile(p.id)} style={{ accentColor: '#6366f1', margin: 0 }} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: '0.85rem', color: isSelected ? '#e6e9ef' : '#a0aec0', fontWeight: isSelected ? 600 : 400 }}>
+                          {p.label}
+                        </div>
+                        <div style={{ fontSize: '0.72rem', color: '#4b5563', marginTop: '0.15rem' }}>
+                          {isExtra ? `SSH ${p.host} · descoberto` : p.type === 'ssh' ? `SSH ${p.host} · em breve` : 'Backend local · localhost:8000'}
+                        </div>
+                      </div>
+                      {isSSH && !isExtra && (
+                        <span style={{ fontSize: '0.68rem', background: '#1f2a3a', color: '#6b7280', padding: '0.15rem 0.4rem', borderRadius: '4px' }}>
+                          em breve
+                        </span>
+                      )}
+                      {isExtra && (
+                        <span style={{ fontSize: '0.68rem', background: '#1a3a2a', color: '#6ee7b7', padding: '0.15rem 0.4rem', borderRadius: '4px' }}>
+                          ROS 2 ✓
+                        </span>
+                      )}
+                    </label>
+                  )
+                })}
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                <button onClick={connectRobot} disabled={connStatus === 'connecting'}
+                  style={{ ...btnStyle('#065f46', '#6ee7b7'), flex: 1 }}>
+                  {connStatus === 'connecting' ? '⏳ Conectando…' : 'Conectar'}
+                </button>
+                {connStatus === 'connected' && (
+                  <button onClick={() => { setConnStatus('idle'); setConnMsg(''); setConnPanel(false) }}
+                    style={btnStyle('#3a1a1a', '#f87171')}>
+                    Desconectar
+                  </button>
+                )}
+              </div>
+              {connMsg && <div style={{ marginTop: '0.6rem', fontSize: '0.78rem', color: connStatus === 'error' ? '#f87171' : '#6ee7b7' }}>{connMsg}</div>}
+            </div>
           )}
         </div>
 
-        {/* Painel dropdown */}
-        {connPanel && (
-          <div style={{
-            position: 'absolute', top: '2.5rem', left: 0, zIndex: 100,
-            background: '#161a22', border: '1px solid #2a3142', borderRadius: '10px',
-            padding: '1rem', width: '360px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-          }}>
-            <div style={{ fontSize: '0.78rem', color: '#8b92a8', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Selecionar robô
-            </div>
+        {/* Botão Procurar robô */}
+        <div ref={discoverRef} style={{ position: 'relative' }}>
+          <button
+            onClick={() => { setDiscoverPanel(v => !v); setConnPanel(false) }}
+            style={{ ...btnStyle('#161a22', '#fbbf24'), display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+          >
+            🔍 Procurar robô
+            <span style={{ fontSize: '0.7rem', opacity: 0.7 }}>{discoverPanel ? '▲' : '▼'}</span>
+          </button>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1rem' }}>
-              {ROBOT_PROFILES.map(p => {
-                const isSSH     = p.type === 'ssh'
-                const isSelected = selectedProfile === p.id
-                return (
-                  <label
-                    key={p.id}
-                    onClick={() => !isSSH && setSelectedProfile(p.id)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: '0.75rem',
-                      padding: '0.6rem 0.85rem', borderRadius: '8px',
-                      border: `1px solid ${isSelected ? '#6366f1' : '#2a3142'}`,
-                      background: isSelected ? 'rgba(99,102,241,0.1)' : 'transparent',
-                      cursor: isSSH ? 'not-allowed' : 'pointer',
-                      opacity: isSSH ? 0.45 : 1,
-                      transition: 'border-color 0.2s, background 0.2s',
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name="robot_profile"
-                      value={p.id}
-                      checked={isSelected}
-                      disabled={isSSH}
-                      onChange={() => setSelectedProfile(p.id)}
-                      style={{ accentColor: '#6366f1', margin: 0 }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: '0.85rem', color: isSelected ? '#e6e9ef' : '#a0aec0', fontWeight: isSelected ? 600 : 400 }}>
-                        {p.label}
-                      </div>
-                      {isSSH && (
-                        <div style={{ fontSize: '0.72rem', color: '#4b5563', marginTop: '0.15rem' }}>
-                          SSH {p.host} · em breve
-                        </div>
-                      )}
-                      {!isSSH && (
-                        <div style={{ fontSize: '0.72rem', color: '#4b5563', marginTop: '0.15rem' }}>
-                          Backend local · localhost:8000
-                        </div>
-                      )}
-                    </div>
-                    {isSSH && (
-                      <span style={{ fontSize: '0.68rem', background: '#1f2a3a', color: '#6b7280', padding: '0.15rem 0.4rem', borderRadius: '4px' }}>
-                        em breve
-                      </span>
-                    )}
-                  </label>
-                )
-              })}
-            </div>
+          {discoverPanel && (
+            <div style={{
+              position: 'absolute', top: '2.5rem', left: 0, zIndex: 100,
+              background: '#161a22', border: '1px solid #2a3142', borderRadius: '10px',
+              padding: '1rem', width: '420px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            }}>
+              <div style={{ fontSize: '0.78rem', color: '#8b92a8', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Descoberta de robôs na rede
+              </div>
 
-            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-              <button
-                onClick={connectRobot}
-                disabled={connStatus === 'connecting'}
-                style={{ ...btnStyle('#065f46', '#6ee7b7'), flex: 1 }}
-              >
-                {connStatus === 'connecting' ? '⏳ Conectando…' : 'Conectar'}
+              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <input
+                  placeholder="Subnet (ex: 192.168.1) — auto se vazio"
+                  value={subnet}
+                  onChange={e => setSubnet(e.target.value)}
+                  style={{ flex: 1, background: '#0d0f14', border: '1px solid #2a3142', borderRadius: '6px', color: '#e6e9ef', padding: '0.4rem 0.6rem', fontSize: '0.8rem', outline: 'none', fontFamily: 'monospace' }}
+                />
+                <input
+                  placeholder="user SSH"
+                  value={sshUser}
+                  onChange={e => setSshUser(e.target.value)}
+                  style={{ width: '90px', background: '#0d0f14', border: '1px solid #2a3142', borderRadius: '6px', color: '#e6e9ef', padding: '0.4rem 0.6rem', fontSize: '0.8rem', outline: 'none', fontFamily: 'monospace' }}
+                />
+              </div>
+
+              <button onClick={discoverRobots} disabled={discovering}
+                style={{ ...btnStyle(discovering ? '#1a2a1a' : '#161a22', '#fbbf24'), width: '100%', marginBottom: '0.75rem' }}>
+                {discovering ? '⏳ Varrendo rede (.1–.254)…' : '▶ Iniciar varredura'}
               </button>
-              {connStatus === 'connected' && (
-                <button
-                  onClick={() => { setConnStatus('idle'); setConnMsg(''); setConnPanel(false) }}
-                  style={btnStyle('#3a1a1a', '#f87171')}
-                >
-                  Desconectar
-                </button>
+
+              {discoverError && (
+                <div style={{ color: '#f87171', fontSize: '0.78rem', marginBottom: '0.5rem' }}>{discoverError}</div>
+              )}
+
+              {discovered.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', maxHeight: '260px', overflowY: 'auto' }}>
+                  {discovered.map(h => {
+                    const st = testingSSH[h.ip]
+                    const stColor = st === 'ok' ? '#6ee7b7' : st === 'no_ros' ? '#fbbf24' : st === 'error' ? '#f87171' : '#8b92a8'
+                    const stLabel = st === 'testing' ? '⏳' : st === 'ok' ? '✓ ROS 2' : st === 'no_ros' ? '⚠ sem ROS' : st === 'error' ? '✗ falhou' : 'Testar SSH'
+                    return (
+                      <div key={h.ip} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', background: '#0d0f14', borderRadius: '6px', padding: '0.5rem 0.75rem', border: `1px solid ${h.likely_robot ? '#2a3a2a' : '#2a3142'}` }}>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: h.likely_robot ? '#6ee7b7' : '#4b5563', display: 'inline-block', flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '0.82rem', color: '#e6e9ef', fontFamily: 'monospace' }}>{h.ip}</div>
+                          <div style={{ fontSize: '0.7rem', color: '#4b5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{h.hostname}</div>
+                        </div>
+                        {h.likely_robot && <span style={{ fontSize: '0.68rem', color: '#6ee7b7', background: '#1a3a2a', padding: '0.1rem 0.35rem', borderRadius: '4px', flexShrink: 0 }}>robô?</span>}
+                        <button onClick={() => testSSH(h.ip)} disabled={st === 'testing'}
+                          style={{ ...btnStyle('#161a22', stColor), fontSize: '0.72rem', padding: '0.25rem 0.5rem', flexShrink: 0 }}>
+                          {stLabel}
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {extraProfiles.length > 0 && (
+                <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#6ee7b7' }}>
+                  ✓ {extraProfiles.length} robô(s) com ROS 2 adicionado(s) ao painel Conectar
+                </div>
               )}
             </div>
+          )}
+        </div>
 
-            {connMsg && connStatus !== 'error' && (
-              <div style={{ marginTop: '0.6rem', fontSize: '0.78rem', color: '#6ee7b7' }}>{connMsg}</div>
-            )}
-            {connStatus === 'error' && (
-              <div style={{ marginTop: '0.6rem', fontSize: '0.78rem', color: '#f87171' }}>{connMsg}</div>
-            )}
-          </div>
+        {/* Status de conexão inline */}
+        {isConnected && (
+          <span style={{ fontSize: '0.8rem', color: '#6ee7b7', fontFamily: 'monospace' }}>
+            ● Conectado — {[...ROBOT_PROFILES, ...extraProfiles].find(p => p.id === selectedProfile)?.label}
+          </span>
+        )}
+        {connStatus === 'error' && (
+          <span style={{ fontSize: '0.8rem', color: '#f87171', fontFamily: 'monospace' }}>✗ {connMsg}</span>
         )}
       </div>
 
