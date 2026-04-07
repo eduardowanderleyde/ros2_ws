@@ -372,7 +372,8 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
             output_serialization_format="cdr",
         )
 
-        odom_path_m = 0.0
+        odom_path_pos = 0.0   # integração por pose.pose.position
+        odom_path_vel = 0.0   # integração por twist.twist.linear (fallback)
         odom_speeds: list = []
         prev_xy: Optional[Tuple[float, float]] = None
         prev_t_ns: Optional[int] = None
@@ -412,15 +413,24 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                 if topic == "/odom" and "Odometry" in ttype:
                     try:
                         msg = deserialize_message(data, _Odom)
-                        x = msg.pose.pose.position.x
-                        y = msg.pose.pose.position.y
+                        x  = msg.pose.pose.position.x
+                        y  = msg.pose.pose.position.y
+                        vx = msg.twist.twist.linear.x
+                        vy = msg.twist.twist.linear.y
+
+                        if prev_t_ns is not None:
+                            dt = (t_ns - prev_t_ns) / 1e9
+                            if 0 < dt < 1.0:
+                                # integração por velocidade (funciona mesmo quando pose é sempre 0)
+                                d_vel = _math.hypot(vx, vy) * dt
+                                odom_path_vel += d_vel
+                                if d_vel > 0:
+                                    odom_speeds.append(_math.hypot(vx, vy))
+
                         if prev_xy is not None:
-                            d = _math.hypot(x - prev_xy[0], y - prev_xy[1])
-                            odom_path_m += d
-                            if prev_t_ns is not None:
-                                dt = (t_ns - prev_t_ns) / 1e9
-                                if dt > 0:
-                                    odom_speeds.append(d / dt)
+                            # integração por posição (funciona quando plugin publica pose)
+                            odom_path_pos += _math.hypot(x - prev_xy[0], y - prev_xy[1])
+
                         prev_xy = (x, y)
                         prev_t_ns = t_ns
                         odom_count += 1
@@ -446,7 +456,8 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                     except Exception:
                         pass
 
-            print(f"[TRACE] odom msgs lidas: {odom_count}  path acumulado: {odom_path_m:.4f} m")
+            odom_path_m = max(odom_path_pos, odom_path_vel)
+            print(f"[TRACE] odom msgs lidas: {odom_count}  path_pos: {odom_path_pos:.4f} m  path_vel: {odom_path_vel:.4f} m  → usando: {odom_path_m:.4f} m")
             reader.close()
             break  # leu com sucesso
 
