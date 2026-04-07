@@ -418,17 +418,20 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                         vx = msg.twist.twist.linear.x
                         vy = msg.twist.twist.linear.y
 
+                        if odom_count < 3:
+                            print(f"[TRACE] odom[{odom_count}] t_ns={t_ns} x={x:.4f} y={y:.4f} vx={vx:.4f} vy={vy:.4f} prev_t_ns={prev_t_ns}")
+
                         if prev_t_ns is not None:
                             dt = (t_ns - prev_t_ns) / 1e9
                             if 0 < dt < 1.0:
-                                # integração por velocidade (funciona mesmo quando pose é sempre 0)
                                 d_vel = _math.hypot(vx, vy) * dt
                                 odom_path_vel += d_vel
                                 if d_vel > 0:
                                     odom_speeds.append(_math.hypot(vx, vy))
+                            elif odom_count < 5:
+                                print(f"[TRACE] odom dt={dt:.6f} fora de (0,1) — ignorado")
 
                         if prev_xy is not None:
-                            # integração por posição (funciona quando plugin publica pose)
                             odom_path_pos += _math.hypot(x - prev_xy[0], y - prev_xy[1])
 
                         prev_xy = (x, y)
@@ -536,6 +539,7 @@ def cmd_record(args: argparse.Namespace) -> int:
     disable_msg: Optional[str] = None
     run_error_code = ""
     path_length_m_estimate = 0.0
+    t_wall_start = time.time()
 
     try:
         print("\n=== Fase A: gravar percurso (coleta + record + waypoints) ===")
@@ -683,6 +687,17 @@ def cmd_record(args: argparse.Namespace) -> int:
         print(f"\nResumo: {'sem falhas' if fails == 0 else f'{fails} falha(s)'}")
         code = 0 if fails == 0 else 1
         rosbag_path = _rosbag_path_from_disable_message(disable_msg)
+        wall_duration_s = round(time.time() - t_wall_start, 2)
+        # Percurso teórico: soma das distâncias entre waypoints consecutivos
+        all_pts = [(0.0, 0.0)] + [(p[0], p[1]) for p in points]
+        theoretical_path_m = round(sum(
+            math.hypot(all_pts[i][0] - all_pts[i-1][0], all_pts[i][1] - all_pts[i-1][1])
+            for i in range(1, len(all_pts))
+        ), 3)
+        print(f"[TRACE] Duração real (parede): {wall_duration_s} s  Percurso teórico: {theoretical_path_m} m")
+        bag_m = _bag_compute_metrics(rosbag_path)
+        bag_m["wall_duration_s"] = wall_duration_s
+        bag_m["theoretical_path_m"] = theoretical_path_m
         if args.export:
             _write_export(
                 args.export,
@@ -701,7 +716,7 @@ def cmd_record(args: argparse.Namespace) -> int:
                     "disable_collection_message": disable_msg,
                     "rosbag_path": rosbag_path,
                     "sensor_summary": _bag_sensor_summary(rosbag_path),
-                    "bag_metrics": _bag_compute_metrics(rosbag_path),
+                    "bag_metrics": bag_m,
                 },
                 args=args,
             )
