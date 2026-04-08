@@ -41,11 +41,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.parameter import Parameter
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry_msgs.msg import PoseWithCovarianceStamped
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
 
 from fleet_msgs.msg import FleetStatus
 from fleet_msgs.srv import (
@@ -76,8 +76,15 @@ def _parse_initial_pose(s: str) -> Tuple[float, float, float]:
 
 
 def _publish_initial_pose(node: Node, x: float, y: float, yaw: float) -> None:
-    """Publica uma vez (com reforço) em /initialpose para o AMCL; stamp = relógio do nó (sim ou parede)."""
-    pub = node.create_publisher(PoseWithCovarianceStamped, "initialpose", 10)
+    """Publica uma vez (com reforço) em /initialpose para SLAM Toolbox / AMCL.
+    Usa RELIABLE + TRANSIENT_LOCAL para compatibilidade com slam_toolbox."""
+    qos = QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        history=HistoryPolicy.KEEP_LAST,
+    )
+    pub = node.create_publisher(PoseWithCovarianceStamped, "initialpose", qos)
     msg = PoseWithCovarianceStamped()
     msg.header.frame_id = "map"
     msg.header.stamp = node.get_clock().now().to_msg()
@@ -219,6 +226,20 @@ class FleetExperimentNode(Node):
                 pass
             rclpy.spin_once(self, timeout_sec=0.1)
         return False
+
+    def wait_map_available(self, timeout_sec: float = 30.0) -> bool:
+        """Espera até receber ao menos uma mensagem em /map (SLAM publicou mapa inicial)."""
+        received: list[bool] = [False]
+
+        def _cb(msg: OccupancyGrid) -> None:
+            received[0] = True
+
+        sub = self.create_subscription(OccupancyGrid, "/map", _cb, 1)
+        t0 = time.time()
+        while time.time() - t0 < timeout_sec and not received[0]:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        self.destroy_subscription(sub)
+        return received[0]
 
     def snapshot_odom_xy(self, spin_sec: float = 0.45) -> Optional[Tuple[float, float]]:
         """Após spin breve, devolve (x,y) do último /odom ou None."""
@@ -403,8 +424,9 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
             from geometry_msgs.msg import PoseWithCovarianceStamped as _PoseStamped
 
             odom_count = 0
-            tf_positions: list = []    # (x, y, t_ns) via map→odom ou map→base_footprint
-            pose_positions: list = []  # (x, y, t_ns) via /pose (SLAM Toolbox — mais fiável)
+            tf_positions: list   = []  # (x, y, t_ns) via TF map→odom|base_footprint
+            pose_positions: list = []  # (x, y, t_ns) via /pose      (SLAM Toolbox)
+            amcl_positions: list = []  # (x, y, t_ns) via /amcl_pose (AMCL — padrão recomendado)
             while reader.has_next():
                 try:
                     topic_raw, data, t_ns = reader.read_next()
@@ -476,6 +498,15 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                     except Exception:
                         pass
 
+                elif topic == "/amcl_pose" and "PoseWithCovarianceStamped" in ttype:
+                    try:
+                        msg = deserialize_message(data, _PoseStamped)
+                        x = msg.pose.pose.position.x
+                        y = msg.pose.pose.position.y
+                        amcl_positions.append((x, y, t_ns))
+                    except Exception:
+                        pass
+
                 elif topic == "/pose" and "PoseWithCovarianceStamped" in ttype:
                     try:
                         msg = deserialize_message(data, _PoseStamped)
@@ -486,35 +517,25 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                         pass
 
             odom_path_m = max(odom_path_pos, odom_path_vel)
-            odom_is_zero = odom_count > 0 and odom_path_m < 0.001
-            print(f"[TRACE] odom msgs lidas: {odom_count}  path_pos: {odom_path_pos:.4f} m  path_vel: {odom_path_vel:.4f} m  → usando: {odom_path_m:.4f} m")
-            if odom_is_zero:
-                print("[TRACE] AVISO: odom sempre zero — usando TF (map→odom) para percurso")
+            print(f"[TRACE] odom msgs lidas: {odom_count}  path: {odom_path_m:.4f} m")
 
-            # Percurso via /pose (SLAM Toolbox PoseWithCovarianceStamped — fonte mais fiável)
-            pose_path_m = 0.0
-            if pose_positions:
-                prev_pose: Optional[tuple] = None
-                for (x, y, _) in pose_positions:
-                    if prev_pose is not None:
-                        d = _math.hypot(x - prev_pose[0], y - prev_pose[1])
-                        if d < 1.0:   # ignora teletransportes
-                            pose_path_m += d
-                    prev_pose = (x, y)
-                print(f"[TRACE] /pose path: {len(pose_positions)} pontos  percurso: {pose_path_m:.4f} m")
+            def _accumulate_path(positions: list, label: str) -> float:
+                """Acumula distância XY ignorando saltos > 1 m (artefactos)."""
+                path = 0.0
+                prev: Optional[tuple] = None
+                for (x, y, _) in positions:
+                    if prev is not None:
+                        d = _math.hypot(x - prev[0], y - prev[1])
+                        if d < 1.0:
+                            path += d
+                    prev = (x, y)
+                print(f"[TRACE] {label}: {len(positions)} pontos  percurso: {path:.4f} m")
+                return path
 
-            # Percurso via TF (map→odom do SLAM Toolbox — fallback se /pose não disponível)
-            tf_path_m = 0.0
-            if tf_positions:
-                # Filtra saltos > 1 m (artefactos de TF) e acumula distância
-                prev_tf: Optional[tuple] = None
-                for (x, y, _) in tf_positions:
-                    if prev_tf is not None:
-                        d = _math.hypot(x - prev_tf[0], y - prev_tf[1])
-                        if d < 1.0:   # ignora teletransportes
-                            tf_path_m += d
-                    prev_tf = (x, y)
-                print(f"[TRACE] TF path: {len(tf_positions)} pontos  percurso: {tf_path_m:.4f} m")
+            # Calcula percurso para cada fonte disponível
+            amcl_path_m = _accumulate_path(amcl_positions, "/amcl_pose") if amcl_positions else 0.0
+            pose_path_m  = _accumulate_path(pose_positions,  "/pose")     if pose_positions  else 0.0
+            tf_path_m    = _accumulate_path(tf_positions,    "TF")        if tf_positions    else 0.0
 
             reader.close()
             break  # leu com sucesso
@@ -522,21 +543,27 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
         metrics: dict = {}
         if duration_s is not None:
             metrics["duration_s"] = round(duration_s, 2)
-        # Prioridade: /pose (SLAM direto) > TF (map→odom) > odom > indisponível
-        if pose_path_m > 0.01:
+
+        # Prioridade de percurso:
+        #   /amcl_pose (AMCL + mapa fixo — mais estável para experimentos reprodutíveis)
+        #   > /pose    (SLAM Toolbox live)
+        #   > TF       (map→odom — fallback)
+        #   > odom     (pouco fiável com SLAM ativo)
+        ref_dur = duration_s or 1
+        if amcl_path_m > 0.01:
+            metrics["amcl_path_length_m"] = round(amcl_path_m, 3)
+            metrics["amcl_avg_speed_ms"]  = round(amcl_path_m / ref_dur, 3)
+        elif pose_path_m > 0.01:
             metrics["pose_path_length_m"] = round(pose_path_m, 3)
-            ref_dur = duration_s or 1
-            metrics["pose_avg_speed_ms"] = round(pose_path_m / ref_dur, 3)
+            metrics["pose_avg_speed_ms"]  = round(pose_path_m / ref_dur, 3)
         elif tf_path_m > 0.01:
             metrics["tf_path_length_m"] = round(tf_path_m, 3)
-            ref_dur = duration_s or 1
-            metrics["tf_avg_speed_ms"] = round(tf_path_m / ref_dur, 3)
+            metrics["tf_avg_speed_ms"]  = round(tf_path_m / ref_dur, 3)
         elif odom_path_m > 0.001:
             metrics["odom_path_length_m"] = round(odom_path_m, 3)
-            if duration_s and duration_s > 0:
-                metrics["odom_avg_speed_ms"] = round(odom_path_m / duration_s, 3)
+            metrics["odom_avg_speed_ms"]  = round(odom_path_m / ref_dur, 3)
         elif odom_count > 0:
-            metrics["odom_unavailable"] = True
+            metrics["path_unavailable"] = True  # robot no bag mas percurso indeterminável
         if scan_valid_counts:
             metrics["scan_avg_valid_points"] = round(sum(scan_valid_counts) / len(scan_valid_counts), 1)
             metrics["scan_min_valid_points"] = min(scan_valid_counts)
@@ -549,22 +576,25 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
         if metrics:
             print("\n[TRACE] Métricas do bag:")
             labels = {
-                "duration_s": "Duração",
-                "pose_path_length_m": "Percurso real (/pose SLAM)",
-                "pose_avg_speed_ms": "Velocidade média (/pose)",
-                "tf_path_length_m": "Percurso real (TF/SLAM)",
-                "tf_avg_speed_ms": "Velocidade média (TF)",
-                "odom_path_length_m": "Percurso /odom",
-                "odom_avg_speed_ms": "Velocidade média (odom)",
+                "duration_s":           "Duração",
+                "amcl_path_length_m":   "Percurso real (AMCL)",
+                "amcl_avg_speed_ms":    "Velocidade média (AMCL)",
+                "pose_path_length_m":   "Percurso real (SLAM /pose)",
+                "pose_avg_speed_ms":    "Velocidade média (SLAM)",
+                "tf_path_length_m":     "Percurso real (TF)",
+                "tf_avg_speed_ms":      "Velocidade média (TF)",
+                "odom_path_length_m":   "Percurso /odom",
+                "odom_avg_speed_ms":    "Velocidade média (odom)",
                 "scan_avg_valid_points": "Scan pontos válidos (média)",
                 "scan_min_valid_points": "Scan pontos válidos (mín)",
-                "imu_accel_mean_ms2": "IMU aceleração média (m/s²)",
+                "imu_accel_mean_ms2":   "IMU aceleração média (m/s²)",
                 "imu_accel_variance_ms2": "IMU variância aceleração",
             }
             units = {
                 "duration_s": "s",
+                "amcl_path_length_m": "m", "amcl_avg_speed_ms": "m/s",
                 "pose_path_length_m": "m", "pose_avg_speed_ms": "m/s",
-                "tf_path_length_m": "m", "tf_avg_speed_ms": "m/s",
+                "tf_path_length_m":   "m", "tf_avg_speed_ms":   "m/s",
                 "odom_path_length_m": "m", "odom_avg_speed_ms": "m/s",
                 "imu_accel_mean_ms2": "m/s²",
             }
@@ -698,6 +728,17 @@ def cmd_record(args: argparse.Namespace) -> int:
         print("[TRACE] Esperando TF map->base_link ...")
         tf_ok = node.wait_tf_available("map", "base_link", timeout_sec=20.0)
         _print(tf_ok, "TF map->base_link disponível")
+
+        # Aguarda mapa do SLAM antes de enviar goals (costmap global precisa do /map).
+        print("[TRACE] Aguardando /map do SLAM Toolbox ...")
+        map_ok = node.wait_map_available(timeout_sec=30.0)
+        _print(map_ok, "/map disponível (SLAM pronto)")
+        if map_ok:
+            # Dá ao costmap global tempo para processar o mapa antes do 1º goal.
+            print("[TRACE] Aguardando costmap processar mapa (3s) ...")
+            t0_map = time.time()
+            while time.time() - t0_map < 3.0:
+                rclpy.spin_once(node, timeout_sec=0.1)
 
         try:
             for i, (x, y, yaw) in enumerate(points, start=1):
@@ -1018,7 +1059,7 @@ def main() -> int:
     pr.add_argument(
         "--topics",
         nargs="+",
-        default=["scan", "odom", "imu", "amcl_pose"],
+        default=["scan", "odom", "imu", "pose"],
         help="Tópicos relativos ao namespace do robô",
     )
     pr.add_argument("--wait-goal", type=float, default=120.0, help="Timeout por goal (s)")
@@ -1055,7 +1096,7 @@ def main() -> int:
     pb.add_argument(
         "--topics",
         nargs="+",
-        default=["scan", "odom", "imu", "amcl_pose"],
+        default=["scan", "odom", "imu", "pose"],
     )
     pb.add_argument("--wait-goal", type=float, default=300.0, help="Timeout da rota completa (s)")
     pb.add_argument(

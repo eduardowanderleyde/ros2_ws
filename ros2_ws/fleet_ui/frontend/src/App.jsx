@@ -16,7 +16,7 @@ const EXAMPLE_RECORD = JSON.stringify({
   robot: "default",
   route: "percurso1",
   collect: true,
-  topics: ["scan", "odom", "imu", "pose"],
+  topics: ["scan", "odom", "imu", "amcl_pose"],
   initial_pose: [0, 0, 0],
   points: [
     [0.5, 0.0, 0.0],
@@ -31,7 +31,7 @@ const EXAMPLE_REPLAY = JSON.stringify({
   robot: "default",
   route: "percurso1",
   collect: true,
-  topics: ["scan", "odom", "imu", "pose"],
+  topics: ["scan", "odom", "imu", "amcl_pose"],
   initial_pose: [0, 0, 0],
   return_to_start: [0, 0, 0]
 }, null, 2)
@@ -581,16 +581,24 @@ export default function App() {
               {job.result.bag_metrics && Object.keys(job.result.bag_metrics).length > 0 && (() => {
                 const m = job.result.bag_metrics
                 const dur = m.wall_duration_s ?? m.duration_s
-                // Prioridade: /pose (SLAM direto) > TF > odom > teórico (waypoints)
-                const posePath  = m.pose_path_length_m
-                const tfPath    = m.tf_path_length_m
-                const odomPath  = m.odom_path_length_m
-                const theoPath  = m.theoretical_path_m
-                const realPath  = posePath ?? tfPath ?? odomPath
-                const path      = realPath ?? theoPath
-                const pathLabel = posePath != null ? 'Percurso real (/pose)' : tfPath != null ? 'Percurso real (TF)' : odomPath != null ? 'Percurso (odom)' : 'Percurso (teórico)'
+                // Prioridade: AMCL > SLAM /pose > TF > odom > teórico (waypoints)
+                const amclPath = m.amcl_path_length_m
+                const posePath = m.pose_path_length_m
+                const tfPath   = m.tf_path_length_m
+                const odomPath = m.odom_path_length_m
+                const theoPath = m.theoretical_path_m
+                const realPath = amclPath ?? posePath ?? tfPath ?? odomPath
+                const path     = realPath ?? theoPath
+                const pathLabel = amclPath != null ? 'Percurso real (AMCL)'
+                               : posePath != null ? 'Percurso real (SLAM)'
+                               : tfPath   != null ? 'Percurso real (TF)'
+                               : odomPath != null ? 'Percurso (odom)'
+                               : 'Percurso (teórico)'
                 const pathColor = realPath != null ? '#6ee7b7' : '#fbbf24'
-                const speed     = posePath != null ? m.pose_avg_speed_ms : tfPath != null ? m.tf_avg_speed_ms : m.odom_avg_speed_ms
+                const speed = amclPath != null ? m.amcl_avg_speed_ms
+                            : posePath != null ? m.pose_avg_speed_ms
+                            : tfPath   != null ? m.tf_avg_speed_ms
+                            : m.odom_avg_speed_ms
                 const cards = [
                   dur      != null && { label: 'Duração',          value: `${dur} s`,        color: '#93c5fd' },
                   path     != null && { label: pathLabel,           value: `${path} m`,       color: pathColor },

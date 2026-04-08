@@ -41,7 +41,9 @@ class SensorCollector(Node):
         "scan": ("sensor_msgs/msg/LaserScan", LaserScan),
         "odom": ("nav_msgs/msg/Odometry", Odometry),
         "imu":  ("sensor_msgs/msg/Imu", Imu),
-        "pose": ("geometry_msgs/msg/PoseWithCovarianceStamped", PoseWithCovarianceStamped),
+        # Localização: inclua apenas um destes conforme o modo usado
+        "amcl_pose": ("geometry_msgs/msg/PoseWithCovarianceStamped", PoseWithCovarianceStamped),  # AMCL (mapa fixo) ← padrão recomendado
+        "pose":      ("geometry_msgs/msg/PoseWithCovarianceStamped", PoseWithCovarianceStamped),  # SLAM Toolbox (live)
     }
     # Tópicos globais (sem prefixo de robot_id, nome fixo)
     _GLOBAL_TOPICS = {
@@ -94,7 +96,7 @@ class SensorCollector(Node):
         )
 
     # Tópicos que precisam de QoS RELIABLE (publicados por nós de localização)
-    _RELIABLE_TOPICS = {"pose"}
+    _RELIABLE_TOPICS = {"pose", "amcl_pose"}  # AMCL e SLAM Toolbox publicam com RELIABLE
 
     def _qos_tf(self) -> QoSProfile:
         return QoSProfile(
