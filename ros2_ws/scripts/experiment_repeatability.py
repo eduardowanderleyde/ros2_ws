@@ -424,9 +424,10 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
             from geometry_msgs.msg import PoseWithCovarianceStamped as _PoseStamped
 
             odom_count = 0
-            tf_positions: list   = []  # (x, y, t_ns) via TF map→odom|base_footprint
-            pose_positions: list = []  # (x, y, t_ns) via /pose      (SLAM Toolbox)
-            amcl_positions: list = []  # (x, y, t_ns) via /amcl_pose (AMCL — padrão recomendado)
+            tf_positions: list      = []  # (x, y, t_ns) via TF map→odom|base_footprint (AMCL/SLAM)
+            tf_odom_positions: list = []  # (x, y, t_ns) via TF odom→base_footprint (diff drive)
+            pose_positions: list    = []  # (x, y, t_ns) via /pose      (SLAM Toolbox)
+            amcl_positions: list    = []  # (x, y, t_ns) via /amcl_pose (AMCL — padrão recomendado)
             while reader.has_next():
                 try:
                     topic_raw, data, t_ns = reader.read_next()
@@ -444,8 +445,8 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                         vx = msg.twist.twist.linear.x
                         vy = msg.twist.twist.linear.y
 
-                        if odom_count < 3:
-                            print(f"[TRACE] odom[{odom_count}] t_ns={t_ns} x={x:.4f} y={y:.4f} vx={vx:.4f} vy={vy:.4f} prev_t_ns={prev_t_ns}")
+                        if odom_count < 3 or odom_count == 100 or odom_count == 500:
+                            print(f"[TRACE] odom[{odom_count}] t_ns={t_ns} x={x:.4f} y={y:.4f} vx={vx:.4f} vy={vy:.4f}")
 
                         if prev_t_ns is not None:
                             dt = (t_ns - prev_t_ns) / 1e9
@@ -491,10 +492,16 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                         for tr in msg.transforms:
                             fid = tr.header.frame_id
                             cid = tr.child_frame_id
-                            # Captura map→odom (posição SLAM) ou map→base_footprint
+                            # map→odom|base_footprint: publicado pelo AMCL/SLAM (posição global)
                             if fid == "map" and cid in ("odom", "base_footprint", "base_link"):
                                 tx = tr.transform.translation
                                 tf_positions.append((tx.x, tx.y, t_ns))
+                            # odom→base_footprint|base_link: publicado pelo diff drive (Gazebo)
+                            elif fid == "odom" and cid in ("base_footprint", "base_link"):
+                                tx = tr.transform.translation
+                                if len(tf_odom_positions) < 3 or len(tf_odom_positions) == 100:
+                                    print(f"[TRACE] tf odom→{cid}[{len(tf_odom_positions)}] x={tx.x:.4f} y={tx.y:.4f} t_ns={t_ns}")
+                                tf_odom_positions.append((tx.x, tx.y, t_ns))
                     except Exception:
                         pass
 
@@ -533,9 +540,10 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
                 return path
 
             # Calcula percurso para cada fonte disponível
-            amcl_path_m = _accumulate_path(amcl_positions, "/amcl_pose") if amcl_positions else 0.0
-            pose_path_m  = _accumulate_path(pose_positions,  "/pose")     if pose_positions  else 0.0
-            tf_path_m    = _accumulate_path(tf_positions,    "TF")        if tf_positions    else 0.0
+            amcl_path_m     = _accumulate_path(amcl_positions,     "/amcl_pose")      if amcl_positions     else 0.0
+            pose_path_m     = _accumulate_path(pose_positions,      "/pose")           if pose_positions     else 0.0
+            tf_path_m       = _accumulate_path(tf_positions,        "TF(map→odom)")   if tf_positions       else 0.0
+            tf_odom_path_m  = _accumulate_path(tf_odom_positions,   "TF(odom→base)")  if tf_odom_positions  else 0.0
 
             reader.close()
             break  # leu com sucesso
@@ -547,7 +555,8 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
         # Prioridade de percurso:
         #   /amcl_pose (AMCL + mapa fixo — mais estável para experimentos reprodutíveis)
         #   > /pose    (SLAM Toolbox live)
-        #   > TF       (map→odom — fallback)
+        #   > TF map→odom  (publicado pelo AMCL — atualiza só com movimento suficiente)
+        #   > TF odom→base (publicado pelo diff drive Gazebo — movimento incremental)
         #   > odom     (pouco fiável com SLAM ativo)
         ref_dur = duration_s or 1
         if amcl_path_m > 0.01:
@@ -559,6 +568,10 @@ def _bag_compute_metrics(bag_path: Optional[str]) -> dict:
         elif tf_path_m > 0.01:
             metrics["tf_path_length_m"] = round(tf_path_m, 3)
             metrics["tf_avg_speed_ms"]  = round(tf_path_m / ref_dur, 3)
+        elif tf_odom_path_m > 0.01:
+            # Fallback: TF odom→base (diff drive Gazebo). Relativo ao frame odom inicial.
+            metrics["tf_path_length_m"] = round(tf_odom_path_m, 3)
+            metrics["tf_avg_speed_ms"]  = round(tf_odom_path_m / ref_dur, 3)
         elif odom_path_m > 0.001:
             metrics["odom_path_length_m"] = round(odom_path_m, 3)
             metrics["odom_avg_speed_ms"]  = round(odom_path_m / ref_dur, 3)

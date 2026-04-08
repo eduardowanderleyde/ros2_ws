@@ -16,7 +16,7 @@ const EXAMPLE_RECORD = JSON.stringify({
   robot: "default",
   route: "percurso1",
   collect: true,
-  topics: ["scan", "odom", "imu", "amcl_pose"],
+  topics: ["scan", "odom", "imu", "amcl_pose", "tf"],
   initial_pose: [0, 0, 0],
   points: [
     [0.5, 0.0, 0.0],
@@ -31,7 +31,7 @@ const EXAMPLE_REPLAY = JSON.stringify({
   robot: "default",
   route: "percurso1",
   collect: true,
-  topics: ["scan", "odom", "imu", "amcl_pose"],
+  topics: ["scan", "odom", "imu", "amcl_pose", "tf"],
   initial_pose: [0, 0, 0],
   return_to_start: [0, 0, 0]
 }, null, 2)
