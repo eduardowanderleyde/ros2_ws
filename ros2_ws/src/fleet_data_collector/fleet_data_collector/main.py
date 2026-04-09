@@ -75,7 +75,12 @@ class SensorCollector(Node):
         return "default" if robot_id == "" else robot_id
 
     def _known(self, robot_id: str) -> bool:
-        return robot_id in self._sessions
+        if robot_id not in self._sessions:
+            if robot_id == "":
+                self._sessions[""] = RobotSession()
+            else:
+                return False
+        return True
 
     def _qos_sensor(self) -> QoSProfile:
         """BEST_EFFORT para sensores (scan, odom, imu) — compatível com Gazebo."""
