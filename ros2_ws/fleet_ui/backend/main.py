@@ -101,7 +101,9 @@ async def lifespan(app: FastAPI):
             from nav_msgs.msg import OccupancyGrid
 
             rclpy.init()
-            node = Node("fleet_ui_bridge")
+            node = Node("fleet_ui_bridge", parameter_overrides=[
+                rclpy.parameter.Parameter("use_sim_time", rclpy.parameter.Parameter.Type.BOOL, True)
+            ])
 
             def fleet_cb(msg):
                 with _status_lock:
